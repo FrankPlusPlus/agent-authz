@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import weakref
 from dataclasses import dataclass, field, replace
+from threading import RLock
 from typing import Any, Iterable, Mapping
 from uuid import uuid4
 
@@ -20,7 +22,10 @@ from authz_sdk.models import (
 )
 from authz_sdk.evaluator import (
     Evaluator,
+    _REVIEWED_PRODUCTION_METHODS,
     _is_reviewed_production_evaluator,
+    _reviewed_production_evaluator_method,
+    _reviewed_production_evaluator_methods_are_intact,
     _reviewed_production_evaluator_mode,
 )
 
@@ -48,14 +53,23 @@ SUPPORTED_TEMPLATES = (
 # still allowing the ordinary ``can()`` pipeline to build one decision/audit
 # envelope. It is an integration guard, not a Python-process sandbox.
 _TRUSTED_AGENT_PHASE_KEY = object()
-_PRODUCTION_EVALUATOR_METHODS = frozenset(
+_PRODUCTION_RUNTIME_MUTABLE_FIELDS = frozenset({"_last_audit_error"})
+_PRODUCTION_FACADE_REVIEWED_ATTRIBUTES = frozenset(
     {
         "authorize",
-        "production_readiness",
-        "_encode_payload",
-        "_validate_response_binding",
-        "_production_configuration_is_intact",
-        "_production_decoder_is_reviewed",
+        "can",
+        "can_entrypoint",
+        "check_many",
+        "explain",
+        "health",
+        "is_production",
+        "readiness",
+        "require",
+        "_can",
+        "_can_agent",
+        "_evaluate",
+        "_finalize_decision",
+        "_remote_response_binding_issue",
     }
 )
 
@@ -76,6 +90,173 @@ class PolicyBinding:
     effect: str = "allow"
     when: Mapping[str, Any] = field(default_factory=dict)
     obligations: Mapping[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class _ProductionEvaluatorSnapshot:
+    """One request's reviewed evaluator capability.
+
+    A production request never needs to rediscover a backend through a mutable
+    facade attribute.  Capturing the exact import-reviewed implementation at
+    the boundary makes the check-and-call relationship explicit, while the
+    adapter seal prevents ordinary post-capture reconfiguration.
+    """
+
+    evaluator: object
+    evaluator_type: type[object]
+    mode: str
+    authorize: Any
+    readiness: Any
+    policy_version: str
+    expected_policy_version: str
+    expected_policy_digest: str
+
+
+@dataclass(frozen=True)
+class _ProductionBoundarySnapshot:
+    """The complete configuration that one production request may trust.
+
+    Keeping every boundary collaborator in the same request-local snapshot
+    prevents a callback such as a resource loader from causing later stages to
+    rediscover a swapped catalog, registry, policy set, evaluator, or audit
+    sink through mutable facade attributes.
+    """
+
+    facade_type: type[object]
+    catalog: Catalog | None
+    policies: "PolicySet"
+    resources: ResourceRegistry
+    evaluator: object | None
+    evaluator_snapshot: _ProductionEvaluatorSnapshot | None
+    catalog_mode: str
+    tenant_boundary: bool
+    require_tenant_context: bool
+    require_trusted_resource: bool
+    audit_sink: Any | None
+    audit_required: bool
+    audit_redactor: Any | None
+    profile: str
+
+
+@dataclass(frozen=True)
+class _ProductionFacadeIdentity:
+    """Construction-time authority record for one production facade.
+
+    A production facade keeps its ordinary configuration attributes visible so
+    applications can inspect them.  This sidecar record deliberately lives
+    outside the instance dictionary, however, so changing ``__dict__`` cannot
+    turn a production object into a development object before the request-local
+    boundary snapshot is captured.  It is an in-process integrity guard, not a
+    sandbox against arbitrary code that can mutate this module's globals.
+    """
+
+    facade_ref: weakref.ReferenceType[Any]
+    facade_type: type[object]
+    profile: str
+    catalog: Catalog | None
+    policies: "PolicySet"
+    resources: ResourceRegistry
+    evaluator: object | None
+    evaluator_type: type[object]
+    catalog_mode: str
+    tenant_boundary: bool
+    require_tenant_context: bool
+    require_trusted_resource: bool
+    audit_sink: Any | None
+    audit_required: bool
+    audit_redactor: Any | None
+
+
+_PRODUCTION_FACADE_IDENTITIES: dict[int, _ProductionFacadeIdentity] = {}
+_PRODUCTION_FACADE_IDENTITIES_LOCK = RLock()
+
+
+def _facade_instance_state(facade: object) -> Mapping[str, Any]:
+    """Read direct instance state without resolving mutable class attributes."""
+
+    try:
+        state = object.__getattribute__(facade, "__dict__")
+    except (AttributeError, TypeError):
+        return {}
+    return state if isinstance(state, dict) else {}
+
+
+def _production_facade_identity(
+    facade: object,
+) -> _ProductionFacadeIdentity | None:
+    """Return this live facade's construction-time production record."""
+
+    with _PRODUCTION_FACADE_IDENTITIES_LOCK:
+        identity = _PRODUCTION_FACADE_IDENTITIES.get(id(facade))
+    if identity is None or identity.facade_ref() is not facade:
+        return None
+    return identity
+
+
+def _is_production_facade(facade: object) -> bool:
+    """Decide production mode without dispatching through facade attributes.
+
+    The original ``Authz.can`` implementation must not rely on a property that
+    a low-level same-layout subclass swap can override before static boundary
+    validation.  An unregistered legacy production claim still takes the
+    fail-closed production path and is rejected by the identity check.
+    """
+
+    if _production_facade_identity(facade) is not None:
+        return True
+    state = _facade_instance_state(facade)
+    return bool(
+        state.get("_production_profile") is True
+        or state.get("profile") == "production"
+    )
+
+
+def _remember_production_facade_identity(
+    facade: object,
+    *,
+    profile: str,
+    catalog: Catalog | None,
+    policies: "PolicySet",
+    resources: ResourceRegistry,
+    evaluator: object | None,
+    catalog_mode: str,
+    tenant_boundary: bool,
+    require_tenant_context: bool,
+    require_trusted_resource: bool,
+    audit_sink: Any | None,
+    audit_required: bool,
+    audit_redactor: Any | None,
+) -> None:
+    """Record production identity without retaining the facade indefinitely."""
+
+    facade_id = id(facade)
+
+    def forget(reference: weakref.ReferenceType[Any]) -> None:
+        with _PRODUCTION_FACADE_IDENTITIES_LOCK:
+            current = _PRODUCTION_FACADE_IDENTITIES.get(facade_id)
+            if current is not None and current.facade_ref is reference:
+                _PRODUCTION_FACADE_IDENTITIES.pop(facade_id, None)
+
+    reference = weakref.ref(facade, forget)
+    identity = _ProductionFacadeIdentity(
+        facade_ref=reference,
+        facade_type=type(facade),
+        profile=profile,
+        catalog=catalog,
+        policies=policies,
+        resources=resources,
+        evaluator=evaluator,
+        evaluator_type=type(evaluator),
+        catalog_mode=catalog_mode,
+        tenant_boundary=tenant_boundary,
+        require_tenant_context=require_tenant_context,
+        require_trusted_resource=require_trusted_resource,
+        audit_sink=audit_sink,
+        audit_required=audit_required,
+        audit_redactor=audit_redactor,
+    )
+    with _PRODUCTION_FACADE_IDENTITIES_LOCK:
+        _PRODUCTION_FACADE_IDENTITIES[facade_id] = identity
 
 
 class PolicySet:
@@ -370,6 +551,54 @@ class Authz:
     tests, but callers do not need to construct them for every request.
     """
 
+    def __getattribute__(self, name: str) -> Any:
+        """Keep ordinary production entrypoint dispatch on reviewed methods.
+
+        Direct writes to ``__dict__`` bypass ``__setattr__`` in Python. For a
+        production facade, ordinary attribute lookup therefore resolves core
+        entrypoints from the original ``Authz`` class rather than an instance
+        shadow or a same-layout subclass override. This is defence in depth
+        for an intact SDK call path, not a process sandbox against hostile code
+        that deliberately bypasses ``__getattribute__`` itself.
+        """
+
+        if (
+            name in _PRODUCTION_FACADE_REVIEWED_ATTRIBUTES
+            and _production_facade_identity(self) is not None
+        ):
+            descriptor = vars(Authz).get(name)
+            if descriptor is not None and hasattr(descriptor, "__get__"):
+                return descriptor.__get__(self, Authz)
+        return object.__getattribute__(self, name)
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        """Keep an accepted production boundary immutable.
+
+        A production facade is an enforcement boundary, not a mutable service
+        container. Reconfiguration must create a new facade so every request
+        observes one complete configuration. The readiness snapshot below
+        remains defence in depth for deserializers or code that bypasses normal
+        attribute assignment inside the trusted host process.
+        """
+
+        if (
+            _production_facade_identity(self) is not None
+            and name not in _PRODUCTION_RUNTIME_MUTABLE_FIELDS
+        ):
+            raise AttributeError(
+                "Authz.production() boundary configuration and methods are immutable; construct a new facade to reconfigure it"
+            )
+        object.__setattr__(self, name, value)
+
+    def __delattr__(self, name: str) -> None:
+        """Reject ordinary removal of production boundary state as well."""
+
+        if _production_facade_identity(self) is not None:
+            raise AttributeError(
+                "Authz.production() boundary configuration and methods are immutable; construct a new facade to reconfigure it"
+            )
+        object.__delattr__(self, name)
+
     @classmethod
     def native(
         cls,
@@ -451,7 +680,11 @@ class Authz:
         provider, durable audit system, or distributed relation service.
         """
 
-        return cls(
+        if cls is not Authz:
+            raise TypeError(
+                "Authz.production() requires the exact Authz facade; use composition for custom behavior"
+            )
+        return Authz(
             catalog,
             policies,
             resources,
@@ -490,6 +723,11 @@ class Authz:
             raise ValueError("audit_required requires an audit_sink")
         if audit_redactor is not None and not callable(getattr(audit_redactor, "redact", None)):
             raise TypeError("audit_redactor must expose a callable redact(field, value)")
+        normalized_profile = str(profile or "custom").strip().lower() or "custom"
+        if normalized_profile == "production" and type(self) is not Authz:
+            raise TypeError(
+                "the production profile requires the exact Authz facade; use composition for custom behavior"
+            )
         self.catalog = catalog
         self.policies = policies or PolicySet()
         self.resources = resources or ResourceRegistry()
@@ -501,33 +739,57 @@ class Authz:
         self.audit_sink = audit_sink
         self.audit_required = bool(audit_required)
         self.audit_redactor = audit_redactor
-        self.profile = str(profile or "custom").strip().lower() or "custom"
-        # This is deliberately separate from the display/configuration string.
-        # A caller can still inspect or even overwrite the public ``profile``
-        # attribute for legacy code, but cannot downgrade an instance created
-        # by ``Authz.production()`` out of its runtime enforcement profile.
+        self.profile = normalized_profile
+        # Retained as a serialized compatibility hint only. The sidecar
+        # production identity registered below is the enforcement authority;
+        # this mutable instance field must never be able to downgrade it.
         self._production_profile = self.profile == "production"
-        self._production_boundary_configuration = (
-            self.catalog,
-            self.policies,
-            self.resources,
-            self.evaluator,
-            self.audit_sink,
-            self.audit_required,
-            self.audit_redactor,
-        )
+        if self._production_profile and self.evaluator is not None and _is_reviewed_production_evaluator(
+            self.evaluator
+        ):
+            sealer = _reviewed_production_evaluator_method(
+                self.evaluator,
+                "_seal_for_production",
+            )
+            if not callable(sealer):
+                raise TypeError("reviewed production evaluator cannot be sealed")
+            try:
+                sealer(self.evaluator)
+            except Exception as exc:
+                raise ValueError(
+                    "reviewed production evaluator could not be sealed"
+                ) from exc
         self._last_audit_error = ""
+        if self._production_profile:
+            _remember_production_facade_identity(
+                self,
+                profile=self.profile,
+                catalog=self.catalog,
+                policies=self.policies,
+                resources=self.resources,
+                evaluator=self.evaluator,
+                catalog_mode=self.catalog_mode,
+                tenant_boundary=self.tenant_boundary,
+                require_tenant_context=self.require_tenant_context,
+                require_trusted_resource=self.require_trusted_resource,
+                audit_sink=self.audit_sink,
+                audit_required=self.audit_required,
+                audit_redactor=self.audit_redactor,
+            )
 
     @property
     def is_production(self) -> bool:
         """Whether this facade was created with the production boundary."""
 
-        return self._production_profile
+        return _is_production_facade(self)
 
     def _reported_profile(self) -> str:
         """Return the immutable effective profile for health/readiness output."""
 
-        return "production" if self.is_production else self.profile
+        if _production_facade_identity(self) is not None:
+            return "production"
+        profile = str(_facade_instance_state(self).get("profile") or "custom").strip().lower()
+        return profile or "custom"
 
     def _production_boundary_configuration_is_intact(self) -> bool:
         """Return whether production-owned boundary collaborators are intact.
@@ -538,15 +800,246 @@ class Authz:
         ownership semantics; replacing the boundary object fails closed.
         """
 
-        configured = self._production_boundary_configuration
+        identity = _production_facade_identity(self)
+        if identity is None:
+            return False
+        state = _facade_instance_state(self)
         return (
-            self.catalog is configured[0]
-            and self.policies is configured[1]
-            and self.resources is configured[2]
-            and self.evaluator is configured[3]
-            and self.audit_sink is configured[4]
-            and self.audit_required == configured[5]
-            and self.audit_redactor is configured[6]
+            type(self) is identity.facade_type
+            and state.get("profile") is identity.profile
+            and state.get("_production_profile") is True
+            and state.get("catalog") is identity.catalog
+            and state.get("policies") is identity.policies
+            and state.get("resources") is identity.resources
+            and state.get("evaluator") is identity.evaluator
+            and type(state.get("evaluator")) is identity.evaluator_type
+            and state.get("catalog_mode") is identity.catalog_mode
+            and state.get("tenant_boundary") is identity.tenant_boundary
+            and state.get("require_tenant_context")
+            is identity.require_tenant_context
+            and state.get("require_trusted_resource")
+            is identity.require_trusted_resource
+            and state.get("audit_sink") is identity.audit_sink
+            and state.get("audit_required") is identity.audit_required
+            and state.get("audit_redactor") is identity.audit_redactor
+        )
+
+    def _production_static_boundary_issues(self) -> list[dict[str, str]]:
+        """Return production errors without invoking a collaborator.
+
+        This check reads only facade attributes and the construction snapshot.
+        It runs before catalog, policy, evaluator, or audit callbacks so a
+        detected replacement cannot execute code or receive data while the
+        boundary is already known to be unsafe.
+        """
+
+        issues: list[dict[str, str]] = []
+        identity = _production_facade_identity(self)
+        if identity is None:
+            issues.append({"level": "error", "code": "production.identity_missing"})
+            return issues
+        state = _facade_instance_state(self)
+        if type(self) is not identity.facade_type:
+            issues.append({"level": "error", "code": "production.facade_type_mutated"})
+        if state.get("profile") is not identity.profile:
+            issues.append({"level": "error", "code": "production.profile_mutated"})
+        if state.get("_production_profile") is not True:
+            issues.append({"level": "error", "code": "production.profile_mutated"})
+        if not Authz._production_boundary_configuration_is_intact(self):
+            issues.append({"level": "error", "code": "production.configuration_mutated"})
+        if issues:
+            return issues
+        if identity.catalog is None:
+            issues.append({"level": "error", "code": "catalog.missing"})
+        elif identity.catalog_mode != "strict":
+            issues.append({"level": "error", "code": "catalog.not_strict"})
+        if identity.tenant_boundary is not True:
+            issues.append({"level": "error", "code": "tenant.boundary_disabled"})
+        if identity.require_tenant_context is not True:
+            issues.append({"level": "error", "code": "tenant.context_not_required"})
+        if identity.require_trusted_resource is not True:
+            issues.append({"level": "error", "code": "resource.trust_not_required"})
+        if identity.audit_required is True and identity.audit_sink is None:
+            issues.append({"level": "error", "code": "audit.required_but_unconfigured"})
+        return issues
+
+    def _production_evaluator_snapshot_failure_issue(self, evaluator: object) -> str:
+        """Name an unsafe evaluator call surface without invoking it."""
+
+        if _reviewed_production_evaluator_mode(evaluator) is None:
+            return "backend.production_evaluator_unreviewed"
+        if not _reviewed_production_evaluator_methods_are_intact(evaluator):
+            return "backend.production_class_modified"
+        if Authz._production_evaluator_methods_are_shadowed(self, evaluator):
+            return "backend.production_method_shadowed"
+        try:
+            instance_values = vars(evaluator)
+        except TypeError:
+            return "backend.production_evaluator_unsealed"
+        if instance_values.get("_production_sealed") is not True:
+            return "backend.production_evaluator_unsealed"
+        return ""
+
+    def _capture_production_evaluator_snapshot(
+        self,
+    ) -> _ProductionEvaluatorSnapshot | None:
+        """Capture the exact reviewed evaluator surface for one request.
+
+        The capture is intentionally made before catalog/resource work.  It
+        neither calls the evaluator nor resolves a dynamic instance method;
+        both callables come from the import-time reviewed registry.
+        """
+
+        evaluator = self.evaluator
+        if evaluator is None:
+            return None
+        if Authz._production_evaluator_snapshot_failure_issue(self, evaluator):
+            return None
+        authorize = _reviewed_production_evaluator_method(evaluator, "authorize")
+        readiness = _reviewed_production_evaluator_method(
+            evaluator,
+            "production_readiness",
+        )
+        if not callable(authorize) or not callable(readiness):
+            return None
+        try:
+            instance_values = vars(evaluator)
+        except TypeError:
+            return None
+        return _ProductionEvaluatorSnapshot(
+            evaluator=evaluator,
+            evaluator_type=type(evaluator),
+            mode=str(_reviewed_production_evaluator_mode(evaluator) or ""),
+            authorize=authorize,
+            readiness=readiness,
+            policy_version=str(instance_values.get("policy_version") or ""),
+            expected_policy_version=str(
+                instance_values.get("expected_policy_version") or ""
+            ),
+            expected_policy_digest=str(
+                instance_values.get("expected_policy_digest") or ""
+            ),
+        )
+
+    def _production_evaluator_snapshot_is_intact(
+        self,
+        snapshot: _ProductionEvaluatorSnapshot,
+    ) -> bool:
+        """Verify a captured evaluator still denotes the reviewed authority."""
+
+        if self.evaluator is not snapshot.evaluator:
+            return False
+        if type(self.evaluator) is not snapshot.evaluator_type:
+            return False
+        if Authz._production_evaluator_snapshot_failure_issue(self, snapshot.evaluator):
+            return False
+        if _reviewed_production_evaluator_mode(snapshot.evaluator) != snapshot.mode:
+            return False
+        if (
+            _reviewed_production_evaluator_method(snapshot.evaluator, "authorize")
+            is not snapshot.authorize
+        ):
+            return False
+        if (
+            _reviewed_production_evaluator_method(
+                snapshot.evaluator,
+                "production_readiness",
+            )
+            is not snapshot.readiness
+        ):
+            return False
+        try:
+            instance_values = vars(snapshot.evaluator)
+        except TypeError:
+            return False
+        return (
+            str(instance_values.get("policy_version") or "")
+            == snapshot.policy_version
+            and str(instance_values.get("expected_policy_version") or "")
+            == snapshot.expected_policy_version
+            and str(instance_values.get("expected_policy_digest") or "")
+            == snapshot.expected_policy_digest
+        )
+
+    def _capture_production_boundary_snapshot(
+        self,
+    ) -> _ProductionBoundarySnapshot | None:
+        """Capture every collaborator and switch trusted by one request."""
+
+        identity = _production_facade_identity(self)
+        if identity is None or not Authz._production_boundary_configuration_is_intact(self):
+            return None
+        evaluator = identity.evaluator
+        evaluator_snapshot = (
+            Authz._capture_production_evaluator_snapshot(self)
+            if evaluator is not None
+            else None
+        )
+        if evaluator is not None and evaluator_snapshot is None:
+            return None
+        snapshot = _ProductionBoundarySnapshot(
+            facade_type=identity.facade_type,
+            catalog=identity.catalog,
+            policies=identity.policies,
+            resources=identity.resources,
+            evaluator=evaluator,
+            evaluator_snapshot=evaluator_snapshot,
+            catalog_mode=identity.catalog_mode,
+            tenant_boundary=identity.tenant_boundary,
+            require_tenant_context=identity.require_tenant_context,
+            require_trusted_resource=identity.require_trusted_resource,
+            audit_sink=identity.audit_sink,
+            audit_required=identity.audit_required,
+            audit_redactor=identity.audit_redactor,
+            profile=identity.profile,
+        )
+        return (
+            snapshot
+            if Authz._production_boundary_snapshot_is_intact(self, snapshot)
+            else None
+        )
+
+    def _production_boundary_snapshot_is_intact(
+        self,
+        snapshot: _ProductionBoundarySnapshot,
+    ) -> bool:
+        """Return whether a request can still rely on its captured boundary."""
+
+        identity = _production_facade_identity(self)
+        state = _facade_instance_state(self)
+        if identity is None:
+            return False
+        if type(self) is not snapshot.facade_type or type(self) is not identity.facade_type:
+            return False
+        if (
+            state.get("_production_profile") is not True
+            or state.get("profile") is not identity.profile
+            or state.get("profile") is not snapshot.profile
+        ):
+            return False
+        if snapshot.profile != "production":
+            return False
+        if (
+            state.get("catalog") is not snapshot.catalog
+            or state.get("policies") is not snapshot.policies
+            or state.get("resources") is not snapshot.resources
+            or state.get("evaluator") is not snapshot.evaluator
+            or state.get("catalog_mode") is not snapshot.catalog_mode
+            or state.get("tenant_boundary") is not snapshot.tenant_boundary
+            or state.get("require_tenant_context")
+            is not snapshot.require_tenant_context
+            or state.get("require_trusted_resource")
+            is not snapshot.require_trusted_resource
+            or state.get("audit_sink") is not snapshot.audit_sink
+            or state.get("audit_required") is not snapshot.audit_required
+            or state.get("audit_redactor") is not snapshot.audit_redactor
+        ):
+            return False
+        if snapshot.evaluator_snapshot is None:
+            return snapshot.evaluator is None
+        return Authz._production_evaluator_snapshot_is_intact(
+            self,
+            snapshot.evaluator_snapshot,
         )
 
     def authorize(self, request: AuthorizationRequest) -> Decision:
@@ -579,12 +1072,12 @@ class Authz:
                 "tenant_boundary": self.tenant_boundary,
                 "require_tenant_context": self.require_tenant_context,
                 "require_trusted_resource": self.require_trusted_resource,
-                "profile": self._reported_profile(),
-                "production_profile": self.is_production,
+                "profile": Authz._reported_profile(self),
+                "production_profile": _is_production_facade(self),
                 "audit_required": self.audit_required,
                 "audit_configured": self.audit_sink is not None,
-                "audit_durability": self._audit_durability(),
-                "audit_identifier_mode": self._audit_identifier_mode(),
+                "audit_durability": Authz._audit_durability(self),
+                "audit_identifier_mode": Authz._audit_identifier_mode(self),
                 "trust_boundary": "trusted_host_process",
                 "last_audit_error": self._last_audit_error,
             }
@@ -596,12 +1089,12 @@ class Authz:
             "tenant_boundary": self.tenant_boundary,
             "require_tenant_context": self.require_tenant_context,
             "require_trusted_resource": self.require_trusted_resource,
-            "profile": self._reported_profile(),
-            "production_profile": self.is_production,
+            "profile": Authz._reported_profile(self),
+            "production_profile": _is_production_facade(self),
             "audit_required": self.audit_required,
             "audit_configured": self.audit_sink is not None,
-            "audit_durability": self._audit_durability(),
-            "audit_identifier_mode": self._audit_identifier_mode(),
+            "audit_durability": Authz._audit_durability(self),
+            "audit_identifier_mode": Authz._audit_identifier_mode(self),
             "trust_boundary": "trusted_host_process",
             "last_audit_error": self._last_audit_error,
         }
@@ -627,7 +1120,7 @@ class Authz:
         selected_catalog_mode = (
             catalog_mode
             if catalog_mode is not None
-            else ("strict" if self.is_production else "advisory")
+            else ("strict" if _is_production_facade(self) else "advisory")
         )
         selected_tenant_boundary = (
             self.tenant_boundary if tenant_boundary is None else bool(tenant_boundary)
@@ -642,7 +1135,7 @@ class Authz:
             if require_trusted_resource is None
             else bool(require_trusted_resource)
         )
-        if self.is_production and (
+        if _is_production_facade(self) and (
             str(selected_catalog_mode or "").strip().lower() != "strict"
             or not selected_tenant_boundary
             or not selected_tenant_context
@@ -663,10 +1156,41 @@ class Authz:
             audit_sink=self.audit_sink,
             audit_required=self.audit_required,
             audit_redactor=self.audit_redactor,
-            profile=self._reported_profile(),
+            profile=Authz._reported_profile(self),
         )
 
-    def readiness(self) -> dict[str, Any]:
+    def _readiness_report(
+        self,
+        issues: list[dict[str, str]],
+        *,
+        catalog_fingerprint: str = "",
+        policy_digest: str = "",
+    ) -> dict[str, Any]:
+        """Build readiness output without touching configured collaborators."""
+
+        boundary_ready = not any(item["level"] == "error" for item in issues)
+        return {
+            # ``ready`` is retained as the compact compatibility field. It
+            # describes only the local SDK boundary, never enterprise-wide
+            # operational readiness (deployment, KMS, shared stores, policy
+            # rollout, and host coverage are outside this process).
+            "ready": boundary_ready,
+            "boundary_ready": boundary_ready,
+            "operational_ready": None,
+            "scope": "local_enforcement_boundary",
+            "trust_boundary": "trusted_host_process",
+            "profile": Authz._reported_profile(self),
+            "production_profile": _is_production_facade(self),
+            "issues": issues,
+            "catalog_fingerprint": catalog_fingerprint,
+            "policy_digest": policy_digest,
+        }
+
+    def readiness(
+        self,
+        *,
+        _production_evaluator_snapshot: _ProductionEvaluatorSnapshot | None = None,
+    ) -> dict[str, Any]:
         """Report whether the configured enforcement point meets its profile.
 
         The SDK cannot prove that a host routed every API, Tool, task, and
@@ -675,12 +1199,17 @@ class Authz:
         """
 
         issues: list[dict[str, str]] = []
+        if _is_production_facade(self):
+            static_issues = Authz._production_static_boundary_issues(self)
+            if static_issues:
+                # Do not invoke a replaced catalog, evaluator, or audit sink.
+                return Authz._readiness_report(self, static_issues)
         if self.catalog is None:
             issues.append({"level": "error", "code": "catalog.missing"})
         elif self.catalog_mode != "strict":
             issues.append(
                 {
-                    "level": "error" if self.is_production else "warning",
+                    "level": "error" if _is_production_facade(self) else "warning",
                     "code": "catalog.not_strict",
                 }
             )
@@ -694,31 +1223,22 @@ class Authz:
                 self.policies.fingerprint()
             except Exception:
                 issues.append({"level": "error", "code": "policy.fingerprint_invalid"})
-        elif self.is_production:
+        elif _is_production_facade(self):
             issues.extend(
                 {"level": "error", "code": code}
-                for code in self._production_backend_issues()
-            )
-        if self.is_production:
-            if self.profile != "production":
-                issues.append({"level": "error", "code": "production.profile_mutated"})
-            if not Authz._production_boundary_configuration_is_intact(self):
-                issues.append(
-                    {"level": "error", "code": "production.configuration_mutated"}
+                for code in Authz._production_backend_issues(
+                    self,
+                    _production_evaluator_snapshot,
                 )
-            if not self.tenant_boundary:
-                issues.append({"level": "error", "code": "tenant.boundary_disabled"})
-            if not self.require_tenant_context:
-                issues.append({"level": "error", "code": "tenant.context_not_required"})
-            if not self.require_trusted_resource:
-                issues.append({"level": "error", "code": "resource.trust_not_required"})
+            )
+        if _is_production_facade(self):
             if self.audit_sink is None:
                 issues.append({"level": "warning", "code": "audit.not_configured"})
-            elif self._audit_durability() != "durable":
+            elif Authz._audit_durability(self) != "durable":
                 issues.append(
                     {
                         "level": "warning",
-                        "code": f"audit.durability_{self._audit_durability()}",
+                        "code": f"audit.durability_{Authz._audit_durability(self)}",
                     }
                 )
             if self.audit_sink is not None and self.audit_redactor is None:
@@ -729,23 +1249,12 @@ class Authz:
             issues.append({"level": "error", "code": "audit.required_but_unconfigured"})
         if self._last_audit_error:
             issues.append({"level": "warning", "code": "audit.last_delivery_failed"})
-        boundary_ready = not any(item["level"] == "error" for item in issues)
-        return {
-            # ``ready`` is retained as the compact compatibility field. It
-            # describes only the local SDK boundary, never enterprise-wide
-            # operational readiness (deployment, KMS, shared stores, policy
-            # rollout, and host coverage are outside this process).
-            "ready": boundary_ready,
-            "boundary_ready": boundary_ready,
-            "operational_ready": None,
-            "scope": "local_enforcement_boundary",
-            "trust_boundary": "trusted_host_process",
-            "profile": self._reported_profile(),
-            "production_profile": self.is_production,
-            "issues": issues,
-            "catalog_fingerprint": self._catalog_fingerprint(),
-            "policy_digest": self._policy_digest() if self.evaluator is None else "",
-        }
+        return Authz._readiness_report(
+            self,
+            issues,
+            catalog_fingerprint=Authz._catalog_fingerprint(self),
+            policy_digest=Authz._policy_digest(self) if self.evaluator is None else "",
+        )
 
     def _catalog_fingerprint(self) -> str:
         if self.catalog is None:
@@ -774,7 +1283,10 @@ class Authz:
 
         return "pseudonymized" if self.audit_redactor is not None else "plaintext"
 
-    def _production_backend_issues(self) -> tuple[str, ...]:
+    def _production_backend_issues(
+        self,
+        snapshot: _ProductionEvaluatorSnapshot | None = None,
+    ) -> tuple[str, ...]:
         """Check the extra transport/identity guarantees a remote PDP needs.
 
         An embedded evaluator such as ``CasbinEvaluator`` is in the service
@@ -784,28 +1296,26 @@ class Authz:
         ``authorize`` method.
         """
 
-        if self.evaluator is None:
+        evaluator = self.evaluator
+        if evaluator is None:
             return ()
-        mode = _reviewed_production_evaluator_mode(self.evaluator)
-        if mode is None:
-            return ("backend.production_evaluator_unreviewed",)
-        if self._production_evaluator_methods_are_shadowed():
-            return ("backend.production_method_shadowed",)
-        readiness = getattr(type(self.evaluator), "production_readiness", None)
-        if not callable(readiness):
-            return (
-                "backend.remote_readiness_missing"
-                if mode == "remote"
-                else "backend.in_process_readiness_missing",
-            )
+        captured = snapshot or Authz._capture_production_evaluator_snapshot(self)
+        if captured is None:
+            issue = Authz._production_evaluator_snapshot_failure_issue(self, evaluator)
+            return (issue or "backend.production_evaluator_changed",)
+        if not Authz._production_evaluator_snapshot_is_intact(self, captured):
+            return ("backend.production_evaluator_changed",)
+        mode = captured.mode
         try:
-            report = readiness(self.evaluator)
+            report = captured.readiness(captured.evaluator)
         except Exception:
             return (
                 "backend.remote_readiness_failed"
                 if mode == "remote"
                 else "backend.in_process_readiness_failed",
             )
+        if not Authz._production_evaluator_snapshot_is_intact(self, captured):
+            return ("backend.production_evaluator_changed",)
         if not isinstance(report, Mapping):
             return (
                 "backend.remote_readiness_invalid"
@@ -828,25 +1338,32 @@ class Authz:
             else "backend.in_process_not_ready",
         )
 
-    def _production_evaluator_methods_are_shadowed(self) -> bool:
+    def _production_evaluator_methods_are_shadowed(
+        self,
+        evaluator: object | None = None,
+    ) -> bool:
         """Reject public instance overrides of reviewed evaluator methods.
 
         Production resolves reviewed methods from the exact class below.  This
         companion check stops a replacement of a method that a reviewed method
         calls dynamically (for example a protocol-specific payload builder).
-        Class-level monkeypatching or private-memory mutation is code already
-        inside the documented trusted host boundary.
+        Class-level call-surface changes are checked separately against the
+        import-time evaluator registry before this instance check runs.
         """
 
-        if self.evaluator is None:
+        target = self.evaluator if evaluator is None else evaluator
+        if target is None:
             return False
         try:
-            instance_values = vars(self.evaluator)
+            instance_values = vars(target)
         except TypeError:
             return True
-        return any(name in instance_values for name in _PRODUCTION_EVALUATOR_METHODS)
+        return any(name in instance_values for name in _REVIEWED_PRODUCTION_METHODS)
 
-    def _production_boundary_issues(self) -> tuple[str, ...]:
+    def _production_boundary_issues(
+        self,
+        snapshot: _ProductionEvaluatorSnapshot | None = None,
+    ) -> tuple[str, ...]:
         """Return every readiness error that must fail closed at execution.
 
         ``readiness()`` is not merely an operator dashboard for the production
@@ -855,8 +1372,18 @@ class Authz:
         must be unable to evaluate a policy successfully.
         """
 
+        static_issues = tuple(
+            item["code"]
+            for item in Authz._production_static_boundary_issues(self)
+            if item["level"] == "error"
+        )
+        if static_issues:
+            return static_issues
         try:
-            report = self.readiness()
+            report = Authz.readiness(
+                self,
+                _production_evaluator_snapshot=snapshot,
+            )
         except Exception:
             return ("production.readiness_failed",)
         if not isinstance(report, Mapping):
@@ -873,6 +1400,40 @@ class Authz:
                 issues.append(code)
         return tuple(issues)
 
+    def _production_boundary_denial(
+        self,
+        boundary_issues: tuple[str, ...],
+        *,
+        operation: str,
+        resource: Resource | None,
+        entrypoint: str,
+        request_id: str,
+        trace_id: str,
+        contract_version: str,
+    ) -> Decision:
+        """Return a denial without reading or invoking unsafe collaborators."""
+
+        if any(code.startswith("backend.") for code in boundary_issues):
+            reason = "authorization backend is not ready for the production profile"
+            reason_code = "backend.not_production_ready"
+        elif boundary_issues == ("policy.fingerprint_invalid",):
+            reason = "policy digest failed"
+            reason_code = "policy.fingerprint_invalid"
+        else:
+            reason = "authorization production boundary is not ready"
+            reason_code = "production.not_ready"
+        return Decision(
+            False,
+            operation,
+            reason=reason,
+            reason_code=reason_code,
+            resource=resource,
+            entrypoint=entrypoint,
+            request_id=request_id,
+            trace_id=trace_id,
+            contract_version=contract_version,
+        )
+
     def _remote_response_binding_issue(
         self,
         decision: Decision,
@@ -881,23 +1442,32 @@ class Authz:
         trace_id: str,
         contract_version: str,
         catalog_fingerprint: str,
+        snapshot: _ProductionEvaluatorSnapshot | None = None,
+        boundary_snapshot: _ProductionBoundarySnapshot | None = None,
     ) -> str:
         """Return a mismatch detail for a production remote PDP response."""
 
-        if not self.is_production or self.evaluator is None:
+        if boundary_snapshot is not None and not Authz._production_boundary_snapshot_is_intact(
+            self,
+            boundary_snapshot,
+        ):
+            return "production_boundary_changed"
+        if boundary_snapshot is None and not _is_production_facade(self):
             return ""
-        if _reviewed_production_evaluator_mode(self.evaluator) != "remote":
+        captured = snapshot or Authz._capture_production_evaluator_snapshot(self)
+        if captured is None or not Authz._production_evaluator_snapshot_is_intact(
+            self,
+            captured,
+        ):
+            return "production_evaluator_changed"
+        if captured.mode != "remote":
             return ""
         expected = {
             "request_id": request_id,
             "contract_version": contract_version,
             "catalog_fingerprint": catalog_fingerprint,
-            "policy_version": str(
-                getattr(self.evaluator, "expected_policy_version", "") or ""
-            ).strip(),
-            "policy_digest": str(
-                getattr(self.evaluator, "expected_policy_digest", "") or ""
-            ).strip(),
+            "policy_version": captured.expected_policy_version,
+            "policy_digest": captured.expected_policy_digest,
         }
         if trace_id:
             expected["trace_id"] = trace_id
@@ -925,31 +1495,92 @@ class Authz:
         trace_id: str,
         contract_version: str,
         catalog_fingerprint: str,
+        _production_boundary_snapshot: _ProductionBoundarySnapshot | None = None,
     ) -> Decision:
         """Attach protocol metadata and emit the optional decision event."""
 
+        def boundary_denial(value: Decision) -> Decision:
+            return replace(
+                value,
+                allowed=False,
+                reason="authorization production boundary changed during evaluation",
+                reason_code="production.not_ready",
+                policy="",
+                obligations={},
+                trace=(),
+                request_id=request_id,
+                trace_id=trace_id,
+                contract_version=contract_version,
+                catalog_fingerprint=catalog_fingerprint,
+            )
+
+        if (
+            _production_boundary_snapshot is not None
+            and not Authz._production_boundary_snapshot_is_intact(
+                self,
+                _production_boundary_snapshot,
+            )
+        ):
+            return boundary_denial(decision)
+
+        policies = (
+            _production_boundary_snapshot.policies
+            if _production_boundary_snapshot is not None
+            else self.policies
+        )
+        evaluator = (
+            _production_boundary_snapshot.evaluator
+            if _production_boundary_snapshot is not None
+            else self.evaluator
+        )
+        audit_sink = (
+            _production_boundary_snapshot.audit_sink
+            if _production_boundary_snapshot is not None
+            else self.audit_sink
+        )
+        audit_required = (
+            _production_boundary_snapshot.audit_required
+            if _production_boundary_snapshot is not None
+            else self.audit_required
+        )
+        audit_redactor = (
+            _production_boundary_snapshot.audit_redactor
+            if _production_boundary_snapshot is not None
+            else self.audit_redactor
+        )
+        policy_digest = decision.policy_digest
+        if not policy_digest and evaluator is None:
+            try:
+                policy_digest = policies.fingerprint()
+            except Exception:
+                policy_digest = ""
+            if (
+                _production_boundary_snapshot is not None
+                and not Authz._production_boundary_snapshot_is_intact(
+                    self,
+                    _production_boundary_snapshot,
+                )
+            ):
+                return boundary_denial(decision)
         finalized = replace(
             decision,
-            policy_version=decision.policy_version or self.policies.version,
+            policy_version=decision.policy_version or policies.version,
             request_id=request_id,
             trace_id=trace_id,
             contract_version=contract_version,
             catalog_fingerprint=catalog_fingerprint,
-            policy_digest=(
-                decision.policy_digest
-                or (self._policy_digest() if self.evaluator is None else "")
-            ),
+            policy_digest=policy_digest,
         )
-        if self.audit_sink is None:
+        if audit_sink is None:
             return finalized
         try:
             from authz_sdk.audit import DecisionEvent
 
-            self.audit_sink.emit(
+            audit_sink.emit(
                 DecisionEvent.from_decision(
                     finalized,
                     subject,
-                    redactor=self.audit_redactor,
+                    redactor=audit_redactor,
                 )
             )
             self._last_audit_error = ""
@@ -959,7 +1590,7 @@ class Authz:
             # into an untracked success. A decision already denied for a
             # stronger boundary reason remains denied with its original reason
             # code so operators can still diagnose the real rejection.
-            if self.audit_required and finalized.allowed:
+            if audit_required and finalized.allowed:
                 return replace(
                     finalized,
                     allowed=False,
@@ -967,6 +1598,14 @@ class Authz:
                     reason_code="audit.delivery_failed",
                     policy="",
                 )
+        if (
+            _production_boundary_snapshot is not None
+            and not Authz._production_boundary_snapshot_is_intact(
+                self,
+                _production_boundary_snapshot,
+            )
+        ):
+            return boundary_denial(finalized)
         return finalized
 
     def can(
@@ -1000,9 +1639,66 @@ class Authz:
         normalized_request_id = str(request_id or "").strip() or uuid4().hex
         normalized_trace_id = str(trace_id or "").strip()
         operation_name = str(operation or "").strip()
+        production_boundary_snapshot: _ProductionBoundarySnapshot | None = None
+        production_evaluator_snapshot: _ProductionEvaluatorSnapshot | None = None
+
+        if _is_production_facade(self):
+            static_boundary_issues = tuple(
+                item["code"]
+                for item in Authz._production_static_boundary_issues(self)
+                if item["level"] == "error"
+            )
+            if static_boundary_issues:
+                return Authz._production_boundary_denial(
+                    self,
+                    static_boundary_issues,
+                    operation=operation_name,
+                    resource=resource,
+                    entrypoint=entrypoint,
+                    request_id=normalized_request_id,
+                    trace_id=normalized_trace_id,
+                    contract_version=normalized_contract_version,
+                )
+            production_boundary_snapshot = (
+                Authz._capture_production_boundary_snapshot(self)
+            )
+            if production_boundary_snapshot is None:
+                issue = (
+                    Authz._production_evaluator_snapshot_failure_issue(
+                        self,
+                        self.evaluator,
+                    )
+                    if self.evaluator is not None
+                    else "production.configuration_mutated"
+                )
+                return Authz._production_boundary_denial(
+                    self,
+                    (issue or "backend.production_evaluator_changed",),
+                    operation=operation_name,
+                    resource=resource,
+                    entrypoint=entrypoint,
+                    request_id=normalized_request_id,
+                    trace_id=normalized_trace_id,
+                    contract_version=normalized_contract_version,
+                )
+            production_evaluator_snapshot = (
+                production_boundary_snapshot.evaluator_snapshot
+            )
+
+        catalog = (
+            production_boundary_snapshot.catalog
+            if production_boundary_snapshot is not None
+            else self.catalog
+        )
+        policies = (
+            production_boundary_snapshot.policies
+            if production_boundary_snapshot is not None
+            else self.policies
+        )
 
         if normalized_contract_version != AUTHZ_CONTRACT_VERSION:
-            return self._finalize_decision(
+            return Authz._finalize_decision(
+                self,
                 Decision(
                     False,
                     operation_name,
@@ -1010,19 +1706,21 @@ class Authz:
                     reason_code="contract.version_unsupported",
                     resource=resource,
                     entrypoint=entrypoint,
-                    policy_version=self.policies.version,
+                    policy_version=policies.version,
                 ),
                 actor,
                 request_id=normalized_request_id,
                 trace_id=normalized_trace_id,
                 contract_version=normalized_contract_version,
                 catalog_fingerprint="",
+                _production_boundary_snapshot=production_boundary_snapshot,
             )
 
         try:
-            actual_catalog_fingerprint = self.catalog.fingerprint() if self.catalog is not None else ""
+            actual_catalog_fingerprint = catalog.fingerprint() if catalog is not None else ""
         except Exception as exc:
-            return self._finalize_decision(
+            return Authz._finalize_decision(
+                self,
                 Decision(
                     False,
                     operation_name,
@@ -1030,13 +1728,32 @@ class Authz:
                     reason_code="catalog.fingerprint_invalid",
                     resource=resource,
                     entrypoint=entrypoint,
-                    policy_version=self.policies.version,
+                    policy_version=policies.version,
                 ),
                 actor,
                 request_id=normalized_request_id,
                 trace_id=normalized_trace_id,
                 contract_version=normalized_contract_version,
                 catalog_fingerprint="",
+                _production_boundary_snapshot=production_boundary_snapshot,
+            )
+
+        if (
+            production_boundary_snapshot is not None
+            and not Authz._production_boundary_snapshot_is_intact(
+                self,
+                production_boundary_snapshot,
+            )
+        ):
+            return Authz._production_boundary_denial(
+                self,
+                ("production.configuration_mutated",),
+                operation=operation_name,
+                resource=resource,
+                entrypoint=entrypoint,
+                request_id=normalized_request_id,
+                trace_id=normalized_trace_id,
+                contract_version=normalized_contract_version,
             )
 
         supplied_catalog_fingerprint = str(catalog_fingerprint or "").strip()
@@ -1045,7 +1762,8 @@ class Authz:
             and actual_catalog_fingerprint
             and supplied_catalog_fingerprint != actual_catalog_fingerprint
         ):
-            return self._finalize_decision(
+            return Authz._finalize_decision(
+                self,
                 Decision(
                     False,
                     operation_name,
@@ -1053,17 +1771,21 @@ class Authz:
                     reason_code="catalog.fingerprint_mismatch",
                     resource=resource,
                     entrypoint=entrypoint,
-                    policy_version=self.policies.version,
+                    policy_version=policies.version,
                 ),
                 actor,
                 request_id=normalized_request_id,
                 trace_id=normalized_trace_id,
                 contract_version=normalized_contract_version,
                 catalog_fingerprint=actual_catalog_fingerprint,
+                _production_boundary_snapshot=production_boundary_snapshot,
             )
 
-        if self.is_production:
-            boundary_issues = self._production_boundary_issues()
+        if _is_production_facade(self):
+            boundary_issues = Authz._production_boundary_issues(
+                self,
+                production_evaluator_snapshot,
+            )
             if boundary_issues:
                 if any(code.startswith("backend.") for code in boundary_issues):
                     reason = "authorization backend is not ready for the production profile"
@@ -1074,7 +1796,8 @@ class Authz:
                 else:
                     reason = "authorization production boundary is not ready"
                     reason_code = "production.not_ready"
-                return self._finalize_decision(
+                return Authz._finalize_decision(
+                    self,
                     Decision(
                         False,
                         operation_name,
@@ -1082,16 +1805,36 @@ class Authz:
                         reason_code=reason_code,
                         resource=resource,
                         entrypoint=entrypoint,
-                        policy_version=self.policies.version,
+                        policy_version=policies.version,
                     ),
                     actor,
                     request_id=normalized_request_id,
                     trace_id=normalized_trace_id,
                     contract_version=normalized_contract_version,
                     catalog_fingerprint=actual_catalog_fingerprint or supplied_catalog_fingerprint,
+                    _production_boundary_snapshot=production_boundary_snapshot,
                 )
 
-        decision = self._can(
+        if (
+            production_boundary_snapshot is not None
+            and not Authz._production_boundary_snapshot_is_intact(
+                self,
+                production_boundary_snapshot,
+            )
+        ):
+            return Authz._production_boundary_denial(
+                self,
+                ("production.configuration_mutated",),
+                operation=operation_name,
+                resource=resource,
+                entrypoint=entrypoint,
+                request_id=normalized_request_id,
+                trace_id=normalized_trace_id,
+                contract_version=normalized_contract_version,
+            )
+
+        decision = Authz._can(
+            self,
             actor,
             action=action,
             resource=resource,
@@ -1105,14 +1848,18 @@ class Authz:
             trace_id=normalized_trace_id,
             contract_version=normalized_contract_version,
             catalog_fingerprint=actual_catalog_fingerprint or supplied_catalog_fingerprint,
+            _production_evaluator_snapshot=production_evaluator_snapshot,
+            _production_boundary_snapshot=production_boundary_snapshot,
         )
-        return self._finalize_decision(
+        return Authz._finalize_decision(
+            self,
             decision,
             actor,
             request_id=normalized_request_id,
             trace_id=normalized_trace_id,
             contract_version=normalized_contract_version,
             catalog_fingerprint=actual_catalog_fingerprint or supplied_catalog_fingerprint,
+            _production_boundary_snapshot=production_boundary_snapshot,
         )
 
     def _can_agent(
@@ -1160,6 +1907,8 @@ class Authz:
         trace_id: str = "",
         contract_version: str = AUTHZ_CONTRACT_VERSION,
         catalog_fingerprint: str = "",
+        _production_evaluator_snapshot: _ProductionEvaluatorSnapshot | None = None,
+        _production_boundary_snapshot: _ProductionBoundarySnapshot | None = None,
     ) -> Decision:
         actor = subject if isinstance(subject, Subject) else Subject.from_user(subject)
         request_context = dict(context or {})
@@ -1174,6 +1923,64 @@ class Authz:
             request_context["authz_phase"] = trusted_agent_phase
         target = resource
         operation_name = str(operation or "").strip()
+        production_boundary_snapshot = _production_boundary_snapshot
+        is_production = production_boundary_snapshot is not None or _is_production_facade(self)
+        if is_production:
+            production_boundary_snapshot = (
+                production_boundary_snapshot
+                or Authz._capture_production_boundary_snapshot(self)
+            )
+            if (
+                production_boundary_snapshot is None
+                or not Authz._production_boundary_snapshot_is_intact(
+                    self,
+                    production_boundary_snapshot,
+                )
+            ):
+                return Decision(
+                    False,
+                    operation_name,
+                    reason="authorization production boundary is not ready",
+                    reason_code="production.not_ready",
+                    resource=target,
+                    entrypoint=entrypoint,
+                    policy_version=policies.version,
+                )
+            catalog = production_boundary_snapshot.catalog
+            policies = production_boundary_snapshot.policies
+            resources = production_boundary_snapshot.resources
+            evaluator = production_boundary_snapshot.evaluator
+            production_evaluator_snapshot = (
+                production_boundary_snapshot.evaluator_snapshot
+            )
+            catalog_mode = production_boundary_snapshot.catalog_mode
+            tenant_boundary = production_boundary_snapshot.tenant_boundary
+            require_tenant_context = (
+                production_boundary_snapshot.require_tenant_context
+            )
+            require_trusted_resource = (
+                production_boundary_snapshot.require_trusted_resource
+            )
+        else:
+            catalog = self.catalog
+            policies = self.policies
+            resources = self.resources
+            evaluator = self.evaluator
+            production_evaluator_snapshot = _production_evaluator_snapshot
+            catalog_mode = self.catalog_mode
+            tenant_boundary = self.tenant_boundary
+            require_tenant_context = self.require_tenant_context
+            require_trusted_resource = self.require_trusted_resource
+
+        def captured_boundary_is_intact() -> bool:
+            return not is_production or bool(
+                production_boundary_snapshot
+                and Authz._production_boundary_snapshot_is_intact(
+                    self,
+                    production_boundary_snapshot,
+                )
+            )
+
         resolved_type = str(resource_type or (target.type if target else "")).strip()
         if target is not None and resource_type and target.type != str(resource_type).strip():
             return Decision(
@@ -1183,7 +1990,7 @@ class Authz:
                 reason_code="resource.type_mismatch",
                 resource=target,
                 entrypoint=entrypoint,
-                policy_version=self.policies.version,
+                policy_version=policies.version,
             )
         if target is not None and resource_id and target.id != str(resource_id).strip():
             return Decision(
@@ -1193,28 +2000,38 @@ class Authz:
                 reason_code="resource.identity_mismatch",
                 resource=target,
                 entrypoint=entrypoint,
-                policy_version=self.policies.version,
+                policy_version=policies.version,
             )
         if not operation_name:
             if target is None:
                 if not resolved_type:
-                    return Decision(False, "", reason="resource or operation is required", reason_code="request.missing_target", entrypoint=entrypoint, policy_version=self.policies.version)
+                    return Decision(False, "", reason="resource or operation is required", reason_code="request.missing_target", entrypoint=entrypoint, policy_version=policies.version)
                 try:
-                    operation_name = self.catalog.operation_for(resolved_type, action) if self.catalog else ""
+                    operation_name = catalog.operation_for(resolved_type, action) if catalog else ""
                     if not operation_name:
                         raise KeyError("catalog is required to derive an operation from a resource action")
                 except KeyError as exc:
-                    return Decision(False, "", reason=str(exc), reason_code="catalog.action_unknown", entrypoint=entrypoint, policy_version=self.policies.version)
+                    return Decision(False, "", reason=str(exc), reason_code="catalog.action_unknown", entrypoint=entrypoint, policy_version=policies.version)
             else:
                 try:
-                    operation_name = self.catalog.operation_for(target.type, action) if self.catalog else ""
+                    operation_name = catalog.operation_for(target.type, action) if catalog else ""
                     if not operation_name:
                         raise KeyError("catalog is required to derive an operation from a resource action")
                 except KeyError as exc:
-                    return Decision(False, "", reason=str(exc), reason_code="catalog.action_unknown", resource=target, entrypoint=entrypoint, policy_version=self.policies.version)
+                    return Decision(False, "", reason=str(exc), reason_code="catalog.action_unknown", resource=target, entrypoint=entrypoint, policy_version=policies.version)
+        if not captured_boundary_is_intact():
+            return Decision(
+                False,
+                operation_name,
+                reason="authorization production boundary changed during catalog resolution",
+                reason_code="production.not_ready",
+                resource=target,
+                entrypoint=entrypoint,
+                policy_version=policies.version,
+            )
         if target is None and resource_id and resolved_type:
             try:
-                target = self.resources.resolve(
+                target = resources.resolve(
                     resolved_type,
                     resource_id,
                     actor,
@@ -1227,7 +2044,7 @@ class Authz:
                     reason=str(exc),
                     reason_code="resource.identity_mismatch",
                     entrypoint=entrypoint,
-                    policy_version=self.policies.version,
+                    policy_version=policies.version,
                 )
             except Exception as exc:
                 return Decision(
@@ -1236,7 +2053,7 @@ class Authz:
                     reason=f"resource resolution failed: {type(exc).__name__}",
                     reason_code="resource.resolution_failed",
                     entrypoint=entrypoint,
-                    policy_version=self.policies.version,
+                    policy_version=policies.version,
                 )
             if target is None:
                 return Decision(
@@ -1245,21 +2062,32 @@ class Authz:
                     reason="resource was not found",
                     reason_code="resource.not_found",
                     entrypoint=entrypoint,
-                    policy_version=self.policies.version,
+                    policy_version=policies.version,
                 )
 
-        definition = self.catalog.operation_definition(operation_name) if self.catalog else None
-        if definition is None and self.catalog_mode == "strict":
-            return Decision(False, operation_name, reason="operation is not registered", reason_code="catalog.operation_unknown", resource=target, entrypoint=entrypoint, policy_version=self.policies.version)
+        if not captured_boundary_is_intact():
+            return Decision(
+                False,
+                operation_name,
+                reason="authorization production boundary changed during resource resolution",
+                reason_code="production.not_ready",
+                resource=target,
+                entrypoint=entrypoint,
+                policy_version=policies.version,
+            )
+
+        definition = catalog.operation_definition(operation_name) if catalog else None
+        if definition is None and catalog_mode == "strict":
+            return Decision(False, operation_name, reason="operation is not registered", reason_code="catalog.operation_unknown", resource=target, entrypoint=entrypoint, policy_version=policies.version)
         if (
-            self.catalog_mode == "strict"
+            catalog_mode == "strict"
             and definition is not None
             and definition.resource_type
             and target is not None
             and target.type != definition.resource_type
         ):
-            return Decision(False, operation_name, reason="resource type does not match operation", reason_code="resource.type_mismatch", resource=target, entrypoint=entrypoint, policy_version=self.policies.version)
-        if self.require_trusted_resource and target is not None and not self.resources.owns(target):
+            return Decision(False, operation_name, reason="resource type does not match operation", reason_code="resource.type_mismatch", resource=target, entrypoint=entrypoint, policy_version=policies.version)
+        if require_trusted_resource and target is not None and not resources.owns(target):
             return Decision(
                 False,
                 operation_name,
@@ -1267,13 +2095,23 @@ class Authz:
                 reason_code="resource.untrusted",
                 resource=target,
                 entrypoint=entrypoint,
-                policy_version=self.policies.version,
+                policy_version=policies.version,
+            )
+        if not captured_boundary_is_intact():
+            return Decision(
+                False,
+                operation_name,
+                reason="authorization production boundary changed during resource validation",
+                reason_code="production.not_ready",
+                resource=target,
+                entrypoint=entrypoint,
+                policy_version=policies.version,
             )
         subject_tenant = str(actor.tenant_id or "").strip()
         resource_tenant = str(
             (target.attributes.get("tenant_id") if target is not None else "") or ""
         ).strip()
-        if self.tenant_boundary and subject_tenant and resource_tenant and subject_tenant != resource_tenant:
+        if tenant_boundary and subject_tenant and resource_tenant and subject_tenant != resource_tenant:
             return Decision(
                 False,
                 operation_name,
@@ -1281,12 +2119,12 @@ class Authz:
                 reason_code="resource.tenant_mismatch",
                 resource=target,
                 entrypoint=entrypoint,
-                policy_version=self.policies.version,
+                policy_version=policies.version,
             )
         tenant_required = bool(definition and getattr(definition, "tenant_required", False))
         if (
-            self.tenant_boundary
-            and (self.require_tenant_context or tenant_required)
+            tenant_boundary
+            and (require_tenant_context or tenant_required)
             and not subject_tenant
         ):
             return Decision(
@@ -1296,9 +2134,9 @@ class Authz:
                 reason_code="subject.tenant_context_missing",
                 resource=target,
                 entrypoint=entrypoint,
-                policy_version=self.policies.version,
+                policy_version=policies.version,
             )
-        if target is not None and self.tenant_boundary and (self.require_tenant_context or tenant_required) and not resource_tenant:
+        if target is not None and tenant_boundary and (require_tenant_context or tenant_required) and not resource_tenant:
             return Decision(
                 False,
                 operation_name,
@@ -1306,32 +2144,31 @@ class Authz:
                 reason_code="resource.tenant_context_missing",
                 resource=target,
                 entrypoint=entrypoint,
-                policy_version=self.policies.version,
+                policy_version=policies.version,
             )
         if (
-            self.catalog_mode == "strict"
+            catalog_mode == "strict"
             and definition is not None
             and definition.requires_resource
             and target is None
         ):
-            return Decision(False, operation_name, reason="a trusted resource is required", reason_code="resource.required", resource=None, entrypoint=entrypoint, policy_version=self.policies.version)
+            return Decision(False, operation_name, reason="a trusted resource is required", reason_code="resource.required", resource=None, entrypoint=entrypoint, policy_version=policies.version)
         if (
-            self.catalog_mode == "strict"
+            catalog_mode == "strict"
             and definition is not None
             and not actor.authenticated
             and not bool((definition.attributes or {}).get("allow_anonymous"))
         ):
-            return Decision(False, operation_name, reason="authentication is required", reason_code="subject.unauthenticated", resource=target, entrypoint=entrypoint, policy_version=self.policies.version)
+            return Decision(False, operation_name, reason="authentication is required", reason_code="subject.unauthenticated", resource=target, entrypoint=entrypoint, policy_version=policies.version)
 
         # A remote PDP must receive an intentionally provisioned principal
         # coordinate. Never silently substitute a legacy email-only Subject as
         # that network identifier: it leaks PII and makes identity stability
         # ambiguous. Local/native evaluators keep legacy email compatibility.
         if (
-            self.is_production
-            and self.evaluator is not None
-            and _is_reviewed_production_evaluator(self.evaluator)
-            and _reviewed_production_evaluator_mode(self.evaluator) == "remote"
+            is_production
+            and production_evaluator_snapshot is not None
+            and production_evaluator_snapshot.mode == "remote"
             and not actor.id
         ):
             return Decision(
@@ -1341,10 +2178,10 @@ class Authz:
                 reason_code="subject.remote_principal_required",
                 resource=target,
                 entrypoint=entrypoint,
-                policy_version=self.policies.version,
+                policy_version=policies.version,
             )
 
-        if self.evaluator is not None:
+        if evaluator is not None:
             request = AuthorizationRequest(
                 subject=actor,
                 operation=operation_name,
@@ -1358,13 +2195,52 @@ class Authz:
                 catalog_fingerprint=catalog_fingerprint,
             )
             try:
-                if self.is_production:
-                    authorizer = getattr(type(self.evaluator), "authorize", None)
-                    if not callable(authorizer):
-                        raise TypeError("reviewed evaluator authorize method is missing")
-                    decision = authorizer(self.evaluator, request)
+                if is_production:
+                    if production_evaluator_snapshot is None:
+                        raise TypeError("reviewed evaluator snapshot is missing")
+                    if not captured_boundary_is_intact():
+                        return Decision(
+                            False,
+                            operation_name,
+                            reason="authorization production boundary changed before evaluation",
+                            reason_code="production.not_ready",
+                            resource=target,
+                            entrypoint=entrypoint,
+                            policy_version=policies.version,
+                        )
+                    late_backend_issues = Authz._production_backend_issues(
+                        self,
+                        production_evaluator_snapshot,
+                    )
+                    if late_backend_issues:
+                        return Decision(
+                            False,
+                            operation_name,
+                            reason="authorization backend is not ready for the production profile",
+                            reason_code="backend.not_production_ready",
+                            resource=target,
+                            entrypoint=entrypoint,
+                            policy_version=policies.version,
+                        )
+                    decision = production_evaluator_snapshot.authorize(
+                        production_evaluator_snapshot.evaluator,
+                        request,
+                    )
+                    if not Authz._production_boundary_snapshot_is_intact(
+                        self,
+                        production_boundary_snapshot,
+                    ):
+                        return Decision(
+                            False,
+                            operation_name,
+                            reason="authorization production boundary changed during evaluation",
+                            reason_code="production.not_ready",
+                            resource=target,
+                            entrypoint=entrypoint,
+                            policy_version=policies.version,
+                        )
                 else:
-                    decision = self.evaluator.authorize(request)
+                    decision = evaluator.authorize(request)
             except Exception as exc:
                 return Decision(
                     False,
@@ -1373,7 +2249,7 @@ class Authz:
                     reason_code="backend.error",
                     resource=target,
                     entrypoint=entrypoint,
-                    policy_version=self.policies.version,
+                    policy_version=policies.version,
                 )
             if not isinstance(decision, Decision):
                 return Decision(
@@ -1383,7 +2259,7 @@ class Authz:
                     reason_code="backend.contract_error",
                     resource=target,
                     entrypoint=entrypoint,
-                    policy_version=self.policies.version,
+                    policy_version=policies.version,
                 )
             if decision.operation and decision.operation != operation_name:
                 return Decision(
@@ -1393,7 +2269,7 @@ class Authz:
                     reason_code="backend.contract_error",
                     resource=target,
                     entrypoint=entrypoint,
-                    policy_version=self.policies.version,
+                    policy_version=policies.version,
                 )
             if (
                 decision.resource is not None
@@ -1410,7 +2286,7 @@ class Authz:
                     reason_code="backend.contract_error",
                     resource=target,
                     entrypoint=entrypoint,
-                    policy_version=self.policies.version,
+                    policy_version=policies.version,
                 )
             if decision.resource is not None and target is None:
                 return Decision(
@@ -1419,7 +2295,7 @@ class Authz:
                     reason="authorization backend invented a resource",
                     reason_code="backend.contract_error",
                     entrypoint=entrypoint,
-                    policy_version=self.policies.version,
+                    policy_version=policies.version,
                 )
             if decision.entrypoint and decision.entrypoint != entrypoint:
                 return Decision(
@@ -1429,14 +2305,17 @@ class Authz:
                     reason_code="backend.contract_error",
                     resource=target,
                     entrypoint=entrypoint,
-                    policy_version=self.policies.version,
+                    policy_version=policies.version,
                 )
-            binding_issue = self._remote_response_binding_issue(
+            binding_issue = Authz._remote_response_binding_issue(
+                self,
                 decision,
                 request_id=request_id,
                 trace_id=trace_id,
                 contract_version=contract_version,
                 catalog_fingerprint=catalog_fingerprint,
+                snapshot=production_evaluator_snapshot,
+                boundary_snapshot=production_boundary_snapshot,
             )
             if binding_issue:
                 return Decision(
@@ -1446,19 +2325,26 @@ class Authz:
                     reason_code="backend.response_binding_invalid",
                     resource=target,
                     entrypoint=entrypoint,
-                    policy_version=self.policies.version,
+                    policy_version=policies.version,
                 )
             return replace(
                 decision,
                 operation=operation_name,
                 resource=target,
                 entrypoint=entrypoint,
-                policy_version=decision.policy_version or getattr(self.evaluator, "policy_version", self.policies.version),
+                policy_version=(
+                    decision.policy_version
+                    or (
+                        production_evaluator_snapshot.policy_version
+                        if production_evaluator_snapshot is not None
+                        else getattr(evaluator, "policy_version", policies.version)
+                    )
+                ),
             )
 
         trace: list[dict[str, Any]] = []
         outcomes: list[tuple[bool, PolicyBinding, str, Mapping[str, Any]]] = []
-        for binding in self.policies.for_operation(operation_name):
+        for binding in policies.for_operation(operation_name):
             selected = _matches_subject(binding, actor) and condition_matches(
                 binding.when,
                 subject=actor,
@@ -1473,18 +2359,18 @@ class Authz:
             })
             if not selected:
                 continue
-            allowed, reason, obligations = self._evaluate(binding, actor, target)
+            allowed, reason, obligations = Authz._evaluate(self, binding, actor, target)
             if allowed is None:
                 continue
             if binding.effect == "deny":
                 allowed = False
             outcomes.append((allowed, binding, reason, {**dict(binding.obligations), **dict(obligations)}))
 
-            if self.policies.combining_for(operation_name) == "first_match":
+            if policies.combining_for(operation_name) == "first_match":
                 break
 
         selected_outcome: tuple[bool, PolicyBinding, str, Mapping[str, Any]] | None = None
-        combining = self.policies.combining_for(operation_name)
+        combining = policies.combining_for(operation_name)
         if combining == "allow_overrides":
             selected_outcome = next((item for item in outcomes if item[0]), None) or (outcomes[0] if outcomes else None)
         elif combining == "first_match":
@@ -1503,17 +2389,17 @@ class Authz:
                 obligations=obligations,
                 trace=tuple(trace),
                 entrypoint=entrypoint,
-                policy_version=self.policies.version,
+                policy_version=policies.version,
             )
         return Decision(
-            self.policies.default_effect_for(operation_name) == "allow",
+            policies.default_effect_for(operation_name) == "allow",
             operation_name,
-            reason="default policy decision" if self.policies.default_effect_for(operation_name) == "allow" else "no applicable policy allows this operation",
-            reason_code="policy.default_allow" if self.policies.default_effect_for(operation_name) == "allow" else "policy.no_match",
+            reason="default policy decision" if policies.default_effect_for(operation_name) == "allow" else "no applicable policy allows this operation",
+            reason_code="policy.default_allow" if policies.default_effect_for(operation_name) == "allow" else "policy.no_match",
             resource=target,
             trace=tuple(trace),
             entrypoint=entrypoint,
-            policy_version=self.policies.version,
+            policy_version=policies.version,
         )
 
     def _evaluate(

@@ -305,7 +305,8 @@ def test_production_profile_cannot_be_downgraded_through_public_profile_attribut
         },
     )
     production = Authz.production(_catalog(), _policies(), resources)
-    production.profile = "custom"
+    with pytest.raises(AttributeError, match="immutable"):
+        production.profile = "custom"
 
     decision = production.can(
         Subject(id="alice", tenant_id="acme"),
@@ -316,11 +317,222 @@ def test_production_profile_cannot_be_downgraded_through_public_profile_attribut
 
     assert production.is_production
     assert production.readiness()["profile"] == "production"
+    assert production.readiness()["ready"]
+    assert decision.allowed
+
+
+def test_production_profile_requires_the_exact_authz_facade_type() -> None:
+    """A subclass cannot inject unchecked helpers into the production path."""
+
+    class BackdoorEvaluateAuthz(Authz):
+        def _evaluate(
+            self,
+            *_args: object,
+            **_kwargs: object,
+        ) -> tuple[bool, str, dict[str, object]]:
+            return True, "unreviewed subclass helper", {}
+
+    with pytest.raises(TypeError, match="exact Authz facade"):
+        BackdoorEvaluateAuthz.production(_catalog(), _policies(), ResourceRegistry())
+    with pytest.raises(TypeError, match="exact Authz facade"):
+        BackdoorEvaluateAuthz(
+            _catalog(),
+            _policies(),
+            ResourceRegistry(),
+            profile="production",
+        )
+
+
+@pytest.mark.parametrize("mutation", ("instance_dict", "object_setattr"))
+def test_production_identity_cannot_be_downgraded_before_can(
+    mutation: str,
+) -> None:
+    """A pre-request low-level profile change must not select native allow."""
+
+    resources = ResourceRegistry()
+    resources.register(
+        "document",
+        lambda resource_id, _subject, _context: {
+            "id": resource_id,
+            "attributes": {"tenant_id": "acme"},
+        },
+    )
+    production = Authz.production(
+        _catalog(),
+        PolicySet(default_effect="allow"),
+        resources,
+    )
+    request = {
+        "operation": "document.publish",
+        "resource_type": "document",
+        "resource_id": "doc-1",
+    }
+    subject = Subject(id="alice", tenant_id="acme")
+
+    # This establishes that the vulnerable custom/native path would allow the
+    # request; the security assertion below is about preserving production
+    # identity after a low-level mutation made before ``can()`` starts.
+    assert production.can(subject, **request).allowed
+
+    if mutation == "instance_dict":
+        production.__dict__["profile"] = "custom"
+        production.__dict__["_production_profile"] = False
+    else:
+        object.__setattr__(production, "profile", "custom")
+        object.__setattr__(production, "_production_profile", False)
+
+    decision = production.can(subject, **request)
+
+    assert production.is_production
+    assert not decision.allowed
+    assert decision.reason_code == "production.not_ready"
     assert "production.profile_mutated" in {
         item["code"] for item in production.readiness()["issues"]
     }
+
+
+def test_production_identity_rejects_a_low_level_facade_subclass_swap() -> None:
+    """`can()` must not dispatch its production mode through an override."""
+
+    class DowngradedAuthz(Authz):
+        @property
+        def is_production(self) -> bool:
+            return False
+
+        def can(self, *_args: object, **_kwargs: object) -> Decision:
+            return Decision(True, "document.publish", reason_code="attacker.outer_allow")
+
+    resources = ResourceRegistry()
+    resources.register(
+        "document",
+        lambda resource_id, _subject, _context: {
+            "id": resource_id,
+            "attributes": {"tenant_id": "acme"},
+        },
+    )
+    production = Authz.production(
+        _catalog(),
+        PolicySet(default_effect="allow"),
+        resources,
+    )
+    request = {
+        "operation": "document.publish",
+        "resource_type": "document",
+        "resource_id": "doc-1",
+    }
+    subject = Subject(id="alice", tenant_id="acme")
+
+    assert production.can(subject, **request).allowed
+    object.__setattr__(production, "__class__", DowngradedAuthz)
+
+    # Ordinary public lookup remains pinned to the reviewed base property and
+    # method, then detects the changed facade type before evaluation.
+    assert production.is_production is True
+    decision = production.can(subject, **request)
+
     assert not decision.allowed
     assert decision.reason_code == "production.not_ready"
+    assert "production.facade_type_mutated" in {
+        item["code"] for item in production.readiness()["issues"]
+    }
+
+
+def test_production_can_ignores_low_level_internal_method_shadows() -> None:
+    """The public production entrypoint must retain its reviewed base path."""
+
+    production = Authz.production(
+        _catalog(),
+        PolicySet(default_effect="allow"),
+        ResourceRegistry(),
+    )
+    shadow_calls: list[str] = []
+
+    def attacker_allow(*_args, **_kwargs) -> Decision:
+        shadow_calls.append("called")
+        return Decision(True, "unregistered.delete", reason_code="attacker.inner_allow")
+
+    production.__dict__["_can"] = attacker_allow
+    production.__dict__["_finalize_decision"] = attacker_allow
+    production.__dict__["can"] = attacker_allow
+
+    decision = production.can(
+        Subject(id="alice", tenant_id="acme"),
+        operation="unregistered.delete",
+    )
+
+    assert not decision.allowed
+    assert decision.reason_code == "catalog.operation_unknown"
+    assert shadow_calls == []
+
+
+def test_production_can_ignores_a_low_level_native_policy_evaluator_shadow() -> None:
+    """An embedded policy deny cannot be replaced by an instance `_evaluate`."""
+
+    policies = PolicySet()
+    policies.bind(
+        id="document_publish_denied",
+        operation="document.publish",
+        template="deny",
+    )
+    resources = ResourceRegistry()
+    resources.register(
+        "document",
+        lambda resource_id, _subject, _context: {
+            "id": resource_id,
+            "attributes": {"tenant_id": "acme"},
+        },
+    )
+    production = Authz.production(_catalog(), policies, resources)
+    shadow_calls: list[str] = []
+
+    def forged_evaluation(
+        *_args: object,
+        **_kwargs: object,
+    ) -> tuple[bool, str, dict[str, object]]:
+        shadow_calls.append("called")
+        return True, "forged", {}
+
+    production.__dict__["_evaluate"] = forged_evaluation
+    decision = production.can(
+        Subject(id="alice", tenant_id="acme"),
+        operation="document.publish",
+        resource_type="document",
+        resource_id="doc-1",
+    )
+
+    assert not decision.allowed
+    assert decision.reason_code == "policy.deny"
+    assert shadow_calls == []
+
+
+def test_production_identity_rejects_a_stateful_catalog_mode_subclass() -> None:
+    """Primitive production switches must not execute attacker equality code."""
+
+    class StatefulStrict(str):
+        def __init__(self, value: str) -> None:
+            self.comparisons = 0
+
+        def __eq__(self, other: object) -> bool:
+            self.comparisons += 1
+            return self.comparisons == 1 and str(other) == "strict"
+
+    production = Authz.production(
+        _catalog(),
+        PolicySet(default_effect="allow"),
+        ResourceRegistry(),
+    )
+    production.__dict__["catalog_mode"] = StatefulStrict("strict")
+
+    decision = production.can(
+        Subject(id="alice", tenant_id="acme"),
+        operation="unregistered.delete",
+    )
+
+    assert not decision.allowed
+    assert decision.reason_code == "production.not_ready"
+    assert "production.configuration_mutated" in {
+        item["code"] for item in production.readiness()["issues"]
+    }
 
 
 def test_production_runtime_rejects_a_post_construction_registry_swap() -> None:
@@ -343,7 +555,8 @@ def test_production_runtime_rejects_a_post_construction_registry_swap() -> None:
             "relations": {"viewer": True},
         },
     )
-    production.resources = replacement
+    with pytest.raises(AttributeError, match="immutable"):
+        production.resources = replacement
 
     decision = production.can(
         Subject(id="alice", tenant_id="acme"),
@@ -352,11 +565,100 @@ def test_production_runtime_rejects_a_post_construction_registry_swap() -> None:
         resource_id="doc-1",
     )
 
+    assert decision.allowed
+    assert production.readiness()["ready"]
+
+
+@pytest.mark.parametrize(
+    ("attribute", "replacement"),
+    (
+        ("catalog", lambda: _catalog()),
+        ("policies", lambda: PolicySet(default_effect="allow")),
+        ("resources", ResourceRegistry),
+        ("evaluator", lambda: None),
+        ("catalog_mode", lambda: "advisory"),
+        ("tenant_boundary", lambda: False),
+        ("require_tenant_context", lambda: False),
+        ("require_trusted_resource", lambda: False),
+        ("audit_sink", object),
+        ("audit_required", lambda: True),
+        ("audit_redactor", object),
+        ("profile", lambda: "custom"),
+    ),
+)
+def test_production_boundary_configuration_is_not_publicly_mutable(
+    attribute: str,
+    replacement,
+) -> None:
+    production = Authz.production(_catalog(), _policies(), ResourceRegistry())
+
+    with pytest.raises(AttributeError, match="immutable"):
+        setattr(production, attribute, replacement())
+
+    assert production.readiness()["ready"]
+
+
+@pytest.mark.parametrize("method_name", ("readiness", "_production_boundary_issues", "_can"))
+def test_production_boundary_methods_are_not_publicly_overridable(
+    method_name: str,
+) -> None:
+    production = Authz.production(_catalog(), _policies(), ResourceRegistry())
+
+    with pytest.raises(AttributeError, match="methods are immutable"):
+        setattr(production, method_name, lambda *_args, **_kwargs: None)
+
+    assert production.readiness()["ready"]
+
+
+def test_production_boundary_seal_rejects_unknown_attributes_and_deletion() -> None:
+    production = Authz.production(_catalog(), _policies(), ResourceRegistry())
+
+    with pytest.raises(AttributeError, match="immutable"):
+        production.unreviewed_extension = object()
+    with pytest.raises(AttributeError, match="immutable"):
+        del production.catalog
+
+    assert production.readiness()["ready"]
+
+
+def test_production_boundary_rejection_precedes_replaced_collaborator_callbacks() -> None:
+    class ProbeCatalog:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def fingerprint(self) -> str:
+            self.calls += 1
+            raise AssertionError("a replaced catalog must not be invoked")
+
+    class ProbeSink:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def emit(self, _event) -> None:
+            self.calls += 1
+            raise AssertionError("a replaced audit sink must not be invoked")
+
+    production = Authz.production(_catalog(), _policies(), ResourceRegistry())
+    catalog = ProbeCatalog()
+    sink = ProbeSink()
+    # Exercise defence in depth for objects introduced by a deserializer or
+    # other low-level in-process code; public assignment is rejected above.
+    object.__setattr__(production, "catalog", catalog)
+    object.__setattr__(production, "audit_sink", sink)
+
+    decision = production.can(
+        Subject(id="alice", tenant_id="acme"),
+        operation="document.publish",
+        contract_version="unsupported",
+    )
+
     assert not decision.allowed
     assert decision.reason_code == "production.not_ready"
-    assert "production.configuration_mutated" in {
-        item["code"] for item in production.readiness()["issues"]
-    }
+    assert catalog.calls == 0
+    assert sink.calls == 0
+    assert not production.readiness()["ready"]
+    assert catalog.calls == 0
+    assert sink.calls == 0
 
 
 def test_runtime_can_verify_and_consume_a_one_time_permit() -> None:

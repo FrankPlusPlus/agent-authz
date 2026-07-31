@@ -31,12 +31,12 @@ Until PyPI publishing is explicitly enabled, use the checked GitHub Release
 wheel—not an unverified package name. Download its checksum alongside it:
 
 ~~~bash
-gh release download v0.7.0b2 --repo FrankPlusPlus/agent-authz \
-  --pattern 'agent_authz_sdk-0.7.0b2-py3-none-any.whl' --pattern WHEEL-SHA256SUMS
+gh release download v0.7.0b3 --repo FrankPlusPlus/agent-authz \
+  --pattern 'agent_authz_sdk-0.7.0b3-py3-none-any.whl' --pattern WHEEL-SHA256SUMS
 shasum -a 256 -c WHEEL-SHA256SUMS
-gh attestation verify agent_authz_sdk-0.7.0b2-py3-none-any.whl \
+gh attestation verify agent_authz_sdk-0.7.0b3-py3-none-any.whl \
   -R FrankPlusPlus/agent-authz
-python -m pip install --no-deps agent_authz_sdk-0.7.0b2-py3-none-any.whl
+python -m pip install --no-deps agent_authz_sdk-0.7.0b3-py3-none-any.whl
 ~~~
 
 For a transparent integration checkout and executable proof, use the release
@@ -44,7 +44,7 @@ tag for development and source review. A Git tag is not a content-addressed
 release proof; verify the release wheel above for a deployed artifact:
 
 ~~~bash
-git clone --branch v0.7.0b2 https://github.com/FrankPlusPlus/agent-authz.git
+git clone --branch v0.7.0b3 https://github.com/FrankPlusPlus/agent-authz.git
 cd agent-authz
 python -m venv .venv
 . .venv/bin/activate
@@ -61,7 +61,7 @@ For a reviewed source-tag dependency during development or source review (not
 as a release-integrity proof):
 
 ~~~bash
-python -m pip install "agent-authz-sdk @ git+https://github.com/FrankPlusPlus/agent-authz.git@v0.7.0b2"
+python -m pip install "agent-authz-sdk @ git+https://github.com/FrankPlusPlus/agent-authz.git@v0.7.0b3"
 ~~~
 
 **Start here:** [Protect an MCP Tool](docs/mcp.md) ·
@@ -177,7 +177,7 @@ def read_document(*, subject, document_id):
 | FastAPI | Available, optional extra | Dependency guard before a route handler | Host provides a verified request identity |
 | MCP Python SDK v2 | Beta, optional extra | Final guard immediately before a registered Tool callable | No MCP OAuth, consent, rate limiting, or dynamic tools/list filtering |
 | Agno / LangGraph | Foundation callable wrappers | Guard Python tools/nodes before execution | Not native framework plugins; no checkpoint, handoff, or streaming coverage |
-| Casbin | Available, optional extra | Use an existing Casbin enforcer behind the common contract | Casbin owns model and policy storage |
+| Casbin | Available, optional extra | Use an existing Casbin enforcer behind the common contract; production supports the default or static request template | Casbin owns model and policy storage |
 | OPA / Cerbos | Experimental starter transports | Proof-of-concept remote evaluation | Not official/full clients; no async pool, retry, or control plane |
 | OpenFGA / SpiceDB | Experimental; static mapping required in production | Proof-of-concept remote relation/permission check | Host maps a business operation to a valid backend relation/permission and owns model/version semantics |
 | RAG CandidateFilter | Available primitive | Filters candidates before prompt assembly | No automatic SQL/vector pushdown or proof every query path is wired |
@@ -207,6 +207,9 @@ still must:
   resource version/transaction state where the domain requires it.
 - Route every relevant API, Tool, MCP, retrieval, and task path through a
   guard; unregistered paths are outside the SDK's visibility.
+- Treat code that can execute arbitrary Python in the service process as
+  trusted. This SDK is not a plugin sandbox; isolate untrusted extensions and
+  put a remote PDP/PEP boundary around them when that threat matters.
 - Use a durable audit sink, shared atomic permit store, query pushdown, key
   management, and an outage policy when the application needs them.
 

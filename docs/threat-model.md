@@ -35,6 +35,7 @@ complete authorization platform.
 | A remote PDP response belongs to another request/policy | Production remote PDPs require HTTPS through the SDK standard TLS transport, pinned revision/digest, and echoed request/catalog/policy binding | Pin hosts/certificates as appropriate, configure timeouts, and operate the PDP securely |
 | A look-alike resource coordinate is returned or a colon appears in an ID | Resource URIs percent-encode each component; evaluator response checks and execution permits compare structured type/ID fields | Preserve raw resource type and ID in external policy/data stores; do not reconstruct identity by splitting a display URI |
 | A redirect forwards PDP credentials | The standard transport refuses redirects and no injected transport is production-ready | Put a reviewed gateway behind the standard transport; do not self-attest arbitrary transport code |
+| A live process partially swaps or pre-request downgrades a production boundary | `Authz.production()` seals ordinary facade/evaluator assignment and deletion, keeps its construction identity outside the facade instance dictionary, pins ordinary production entrypoint lookup to reviewed `Authz` methods, derives inherited `can()` production mode through that non-virtual identity, captures catalog, policy set, resource registry, evaluator, audit collaborators, and profile switches before resource work, then rechecks that full snapshot before evaluation and before an allow returns | Build and atomically install a new facade for a configuration/policy-system migration; do not mutate a live PEP |
 | Unauthorized RAG text reaches a prompt | `CandidateFilter` fails closed per candidate and returns body-free diagnostics | Apply it before every prompt/cache/output path, and add database/vector pushdown for scale |
 | A permit is replayed | Permit is time/resource-version bound; `PermitStore` supports atomic one-time consumption | Use a shared atomic store, rotate keys, and make the final version check part of the side-effect transaction |
 | Audit identifiers leak PII | Fixed event schema excludes rich request data; `AuditRedactor` HMAC-pseudonymizes subject/resource/entrypoint/request/trace values | Keep the redaction key in a secret manager, plan key rotation, and use durable monitored storage/retention |
@@ -59,7 +60,11 @@ The SDK does not by itself provide:
 it prevents ordinary request/model values and resources from another registry
 from being accepted as trusted by this `Authz` instance. It is not an isolation
 boundary against code that can inspect and call arbitrary objects in the same
-process. `health()` and `readiness()` expose
+process. The production sidecar/snapshot protections likewise apply when the
+reviewed SDK entrypoint is invoked; they cannot stop code that directly bypasses
+Python attribute dispatch (including a forged `__class__` with its own
+`__getattribute__`), replaces class/module state, or performs the side effect
+itself. `health()` and `readiness()` expose
 `trust_boundary="trusted_host_process"` so deployment checks do not mistake
 this SDK boundary for a plugin sandbox.
 

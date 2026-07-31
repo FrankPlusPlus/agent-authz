@@ -5,7 +5,7 @@ from __future__ import annotations
 import functools
 import inspect
 from dataclasses import dataclass
-from typing import Any, Callable, Mapping, TypeVar
+from typing import Any, Callable, Mapping, TypeVar, overload
 
 from authz_sdk.coverage import CoverageManifest
 from authz_sdk.models import Resource, Subject
@@ -96,6 +96,7 @@ def _mark_wrapper(
     return wrapper
 
 
+@overload
 def protect_tool(
     tool: T,
     *,
@@ -115,8 +116,62 @@ def protect_tool(
     coverage: CoverageManifest | None = None,
     coverage_kind: str = "tool",
     coverage_evidence: str = "",
-) -> T:
+) -> T: ...
+
+
+@overload
+def protect_tool(
+    tool: None = None,
+    *,
+    runtime: AgentRuntime,
+    operation: str,
+    subject: ValueProvider,
+    resource: ValueProvider = None,
+    resource_type: ValueProvider = "",
+    resource_id: ValueProvider = "",
+    context: ValueProvider = None,
+    arguments: ValueProvider = None,
+    phase: str = "execute",
+    tool_name: str = "",
+    pack_name: str = "",
+    agent_id: ValueProvider = "",
+    session_id: ValueProvider = "",
+    coverage: CoverageManifest | None = None,
+    coverage_kind: str = "tool",
+    coverage_evidence: str = "",
+) -> Callable[[T], T]: ...
+
+
+def protect_tool(
+    tool: T | None = None,
+    *,
+    runtime: AgentRuntime,
+    operation: str,
+    subject: ValueProvider,
+    resource: ValueProvider = None,
+    resource_type: ValueProvider = "",
+    resource_id: ValueProvider = "",
+    context: ValueProvider = None,
+    arguments: ValueProvider = None,
+    phase: str = "execute",
+    tool_name: str = "",
+    pack_name: str = "",
+    agent_id: ValueProvider = "",
+    session_id: ValueProvider = "",
+    coverage: CoverageManifest | None = None,
+    coverage_kind: str = "tool",
+    coverage_evidence: str = "",
+) -> T | Callable[[T], T]:
     """Return a sync/async callable that authorizes before invoking ``tool``.
+
+    Use the direct form when a framework hands you an existing callable::
+
+        protected = protect_tool(read_document, runtime=runtime, ...)
+
+    Or use the decorator form at the execution boundary::
+
+        @protect_tool(runtime=runtime, ...)
+        def read_document(...): ...
 
     Providers receive ``CallInput(args, kwargs)``. For a production
     ``Authz.production`` boundary, prefer ``resource_type`` plus
@@ -126,6 +181,29 @@ def protect_tool(
     returns a registry-loaded resource.
     """
 
+    if tool is None:
+        def decorator(target: T) -> T:
+            return protect_tool(
+                target,
+                runtime=runtime,
+                operation=operation,
+                subject=subject,
+                resource=resource,
+                resource_type=resource_type,
+                resource_id=resource_id,
+                context=context,
+                arguments=arguments,
+                phase=phase,
+                tool_name=tool_name,
+                pack_name=pack_name,
+                agent_id=agent_id,
+                session_id=session_id,
+                coverage=coverage,
+                coverage_kind=coverage_kind,
+                coverage_evidence=coverage_evidence,
+            )
+
+        return decorator
     if not callable(tool):
         raise TypeError("tool must be callable")
     name = tool_name or str(getattr(tool, "__name__", "tool"))

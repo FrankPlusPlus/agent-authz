@@ -2,6 +2,19 @@
 
 All notable changes to this project will be documented here.
 
+## 0.7.0b3 - 2026-07-31
+
+- Closed final independent-review production races: an accepted evaluator now
+  rejects every ordinary attribute write/deletion (including a new field or
+  `__class__`), and each request snapshots catalog, policies, resource
+  registry, evaluator, audit collaborators, and boundary switches. The SDK
+  rechecks that complete snapshot after resource work, before evaluation, and
+  before an allow returns, so a low-level registry/type swap fails closed
+  instead of influencing a later stage of the same request.
+- Hardened Casbin adapter output handling: production accepts only a boolean
+  decision (or a tuple headed by one); truthy strings, mappings, lists, and
+  other nonstandard values now fail closed as `casbin.error`.
+
 ## 0.7.0b2 - 2026-07-31
 
 - Fixed the GitHub Linux release lock by explicitly pinning the conditional
@@ -59,6 +72,14 @@ All notable changes to this project will be documented here.
   as a backend identifier. Production accepts only a declarative, immutable
   `operation_map`, preventing mutable mapper closures or dictionaries from
   silently changing a relation/permission after the PEP starts.
+- Production facades now freeze normal public boundary and method replacement,
+  exact evaluator classes retain their import-time production call surface,
+  and accepted remote/in-process evaluators seal their public wire/configuration
+  attributes. Casbin production accepts the reviewed default request or an
+  immutable declarative `request_fields` / `CasbinRequestTemplate`; mutable
+  `request_builder` callbacks remain development-only. Remote PDP evaluators
+  also copy caller-owned projections and fail closed if an evaluator-owned
+  projection or supplied TLS context's security state drifts after sealing.
 
 ## 0.6.0 - 2026-07-31
 

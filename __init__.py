@@ -6,7 +6,7 @@ integrations can bind their entrypoints to the same operation without making
 application developers learn the policy engine internals.
 """
 
-__version__ = "0.7.0b2"
+__version__ = "0.7.0b3"
 
 from authz_sdk.catalog import (
     CRUD_ACTIONS,
@@ -54,6 +54,7 @@ from authz_sdk.permit_store import (
 from authz_sdk.runtime import AGENT_PHASES, AgentRequest, AgentRuntime
 from authz_sdk.backends import (
     AuthzenEvaluator,
+    CasbinRequestTemplate,
     CasbinEvaluator,
     CerbosEvaluator,
     JsonPdpEvaluator,
@@ -96,6 +97,7 @@ __all__ = [
     "Evaluator",
     "BackendUnavailableError",
     "AuthzenEvaluator",
+    "CasbinRequestTemplate",
     "CasbinEvaluator",
     "CerbosEvaluator",
     "JsonPdpEvaluator",

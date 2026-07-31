@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import ssl
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from threading import Thread
+from threading import Event, Thread
 
 import pytest
 
@@ -14,12 +14,14 @@ from authz_sdk import (
     AgentRuntime,
     Authz,
     AuthzenEvaluator,
+    CasbinRequestTemplate,
     CasbinEvaluator,
     Catalog,
     CerbosEvaluator,
     JsonPdpEvaluator,
     OpaEvaluator,
     OpenFgaEvaluator,
+    OperationMap,
     PdpRequestProjection,
     PolicySet,
     ResourceRegistry,
@@ -360,6 +362,458 @@ def test_production_relation_backends_freeze_declarative_operation_maps(
     assert evaluator.production_readiness()["ready"] is True
     assert evaluator.operation_mapper(_request("document.read")) == expected_mapping
     assert _production_remote_authz(evaluator).readiness()["ready"] is True
+
+
+def test_production_remote_backend_copies_and_seals_projection_state() -> None:
+    configured_projection = PdpRequestProjection(subject_field_keys=("id",))
+    evaluator = OpaEvaluator(
+        "https://pdp.example.test/allow",
+        policy_version="remote-revision-7",
+        expected_policy_digest="remote-digest-7",
+        projection=configured_projection,
+    )
+    authz = _production_remote_authz(evaluator)
+
+    # The evaluator must not retain an externally owned projection object.
+    configured_projection.__dict__["subject_field_keys"] = ("email",)
+    assert evaluator.projection.subject_field_keys == ("id",)
+    assert authz.readiness()["ready"] is True
+
+    # Defence in depth: a low-level mutation of the evaluator-owned immutable
+    # object must be visible to production readiness before any PDP call.
+    evaluator.projection.__dict__["subject_field_keys"] = ("email",)
+    decision = authz.can(
+        Subject(id="alice", email="alice@example.test", tenant_id="acme"),
+        operation="document.read",
+        resource_type="document",
+        resource_id="doc-1",
+    )
+
+    assert not decision.allowed
+    assert decision.reason_code == "backend.not_production_ready"
+    assert "backend.remote_configuration_mutated" in {
+        item["code"] for item in authz.readiness()["issues"]
+    }
+
+
+def test_production_remote_backend_detects_tls_context_security_drift() -> None:
+    context = ssl.create_default_context()
+    evaluator = OpaEvaluator(
+        "https://pdp.example.test/allow",
+        policy_version="remote-revision-7",
+        expected_policy_digest="remote-digest-7",
+        ssl_context=context,
+    )
+    authz = _production_remote_authz(evaluator)
+
+    context.maximum_version = ssl.TLSVersion.TLSv1_2
+    decision = authz.can(
+        Subject(id="alice", tenant_id="acme"),
+        operation="document.read",
+        resource_type="document",
+        resource_id="doc-1",
+    )
+
+    assert not decision.allowed
+    assert decision.reason_code == "backend.not_production_ready"
+    assert "backend.remote_configuration_mutated" in {
+        item["code"] for item in authz.readiness()["issues"]
+    }
+
+
+def test_production_remote_backend_rejects_a_post_construction_protocol_class_swap() -> None:
+    evaluator = OpenFgaEvaluator(
+        "https://pdp.example.test/allow",
+        policy_version="remote-revision-7",
+        expected_policy_digest="remote-digest-7",
+        operation_map={"document.read": "viewer"},
+    )
+    authz = _production_remote_authz(evaluator)
+
+    with pytest.raises(AttributeError, match="configuration is immutable"):
+        evaluator.__class__ = OpaEvaluator
+    with pytest.raises(AttributeError, match="configuration is immutable"):
+        evaluator.unreviewed_extension = object()
+    with pytest.raises(AttributeError, match="configuration is immutable"):
+        del evaluator.endpoint
+    assert authz.readiness()["ready"] is True
+
+    # Exercise the facade snapshot as defence in depth for an object restored
+    # or changed through low-level same-process code that bypasses __setattr__.
+    object.__setattr__(evaluator, "__class__", OpaEvaluator)
+    decision = authz.can(
+        Subject(id="alice", tenant_id="acme"),
+        operation="document.read",
+        resource_type="document",
+        resource_id="doc-1",
+    )
+
+    assert not decision.allowed
+    assert decision.reason_code == "production.not_ready"
+    assert "production.configuration_mutated" in {
+        item["code"] for item in authz.readiness()["issues"]
+    }
+
+
+def test_production_evaluator_seal_and_snapshot_block_a_swap_during_resource_resolution(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A normal attribute/class assignment cannot race a captured evaluator."""
+
+    started = Event()
+    resume = Event()
+
+    def loader(resource_id, _subject, _context):
+        started.set()
+        assert resume.wait(timeout=2)
+        return {
+            "id": resource_id,
+            "attributes": {"tenant_id": "acme"},
+        }
+
+    catalog = Catalog()
+    catalog.resource("document", actions=("read",), tenant_required=True)
+    resources = ResourceRegistry()
+    resources.register("document", loader)
+    evaluator = JsonPdpEvaluator(
+        "https://pdp.example.test/allow",
+        policy_version="remote-revision-7",
+        expected_policy_digest="remote-digest-7",
+    )
+    authz = Authz.production(
+        catalog,
+        PolicySet(version="local-metadata-1"),
+        resources,
+        evaluator=evaluator,
+    )
+
+    transport_calls = []
+
+    def deny_transport(_endpoint, _payload, headers, _timeout, **_kwargs):
+        transport_calls.append(headers)
+        return {
+            "allowed": False,
+            "request_id": headers["x-authz-request-id"],
+            "contract_version": headers["x-authz-contract-version"],
+            "catalog_fingerprint": headers["x-authz-catalog-fingerprint"],
+            "policy_version": headers["x-authz-policy-version"],
+            "policy_digest": headers["x-authz-policy-digest"],
+        }
+
+    monkeypatch.setattr("authz_sdk.backends._urllib_transport", deny_transport)
+    decisions = []
+    worker = Thread(
+        target=lambda: decisions.append(
+            authz.can(
+                Subject(id="alice", tenant_id="acme"),
+                operation="document.read",
+                resource_type="document",
+                resource_id="doc-1",
+            )
+        ),
+        daemon=True,
+    )
+    worker.start()
+    assert started.wait(timeout=2)
+
+    class AllowEnforcer:
+        def enforce(self, *_args) -> bool:
+            return True
+
+    with pytest.raises(AttributeError, match="configuration is immutable"):
+        evaluator.enforcer = AllowEnforcer()
+    with pytest.raises(AttributeError, match="configuration is immutable"):
+        evaluator.request_builder = CasbinEvaluator.default_request
+    with pytest.raises(AttributeError, match="configuration is immutable"):
+        evaluator.__class__ = CasbinEvaluator
+
+    # The normal public path above is sealed. Exercise the request-local
+    # snapshot as a separate fail-closed defence for a hostile same-process
+    # mutation that bypasses that ordinary Python assignment protocol.
+    object.__setattr__(evaluator, "__class__", CasbinEvaluator)
+
+    resume.set()
+    worker.join(timeout=2)
+
+    assert not worker.is_alive()
+    assert len(decisions) == 1
+    assert decisions[0].allowed is False
+    assert decisions[0].reason_code == "production.not_ready"
+    assert transport_calls == []
+
+
+def test_production_boundary_snapshot_denies_a_registry_swap_during_resource_resolution() -> None:
+    """A loader cannot make a later ownership check rediscover a new registry."""
+
+    started = Event()
+    resume = Event()
+
+    def loader(resource_id, _subject, _context):
+        started.set()
+        assert resume.wait(timeout=2)
+        return {
+            "id": resource_id,
+            "attributes": {"tenant_id": "acme"},
+        }
+
+    class AllowEnforcer:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def enforce(self, *_args) -> bool:
+            self.calls += 1
+            return True
+
+    class ReplacementRegistry:
+        def owns(self, _resource) -> bool:
+            return True
+
+    catalog = Catalog()
+    catalog.resource("document", actions=("read",), tenant_required=True)
+    resources = ResourceRegistry()
+    resources.register("document", loader)
+    enforcer = AllowEnforcer()
+    authz = Authz.production(
+        catalog,
+        PolicySet(version="local-metadata-1"),
+        resources,
+        evaluator=CasbinEvaluator(
+            enforcer,
+            request_fields=("subject.id", "resource.uri", "operation"),
+        ),
+    )
+    decisions = []
+    worker = Thread(
+        target=lambda: decisions.append(
+            authz.can(
+                Subject(id="alice", tenant_id="acme"),
+                operation="document.read",
+                resource_type="document",
+                resource_id="doc-1",
+            )
+        ),
+        daemon=True,
+    )
+    worker.start()
+    assert started.wait(timeout=2)
+
+    object.__setattr__(authz, "resources", ReplacementRegistry())
+    resume.set()
+    worker.join(timeout=2)
+
+    assert not worker.is_alive()
+    assert len(decisions) == 1
+    assert decisions[0].allowed is False
+    assert decisions[0].reason_code == "production.not_ready"
+    assert enforcer.calls == 0
+
+
+def test_production_boundary_snapshot_denies_a_facade_swap_during_resource_resolution() -> None:
+    """The inherited control path cannot become a downgraded subclass mid-request."""
+
+    started = Event()
+    resume = Event()
+
+    def loader(resource_id, _subject, _context):
+        started.set()
+        assert resume.wait(timeout=2)
+        return {
+            "id": resource_id,
+            "attributes": {"tenant_id": "acme"},
+        }
+
+    class AllowEnforcer:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def enforce(self, *_args) -> bool:
+            self.calls += 1
+            return True
+
+    class DowngradedAuthz(Authz):
+        @property
+        def is_production(self) -> bool:
+            return False
+
+    catalog = Catalog()
+    catalog.resource("document", actions=("read",), tenant_required=True)
+    resources = ResourceRegistry()
+    resources.register("document", loader)
+    enforcer = AllowEnforcer()
+    authz = Authz.production(
+        catalog,
+        PolicySet(version="local-metadata-1"),
+        resources,
+        evaluator=CasbinEvaluator(
+            enforcer,
+            request_fields=("subject.id", "resource.uri", "operation"),
+        ),
+    )
+    decisions = []
+    worker = Thread(
+        target=lambda: decisions.append(
+            authz.can(
+                Subject(id="alice", tenant_id="acme"),
+                operation="document.read",
+                resource_type="document",
+                resource_id="doc-1",
+            )
+        ),
+        daemon=True,
+    )
+    worker.start()
+    assert started.wait(timeout=2)
+
+    object.__setattr__(authz, "__class__", DowngradedAuthz)
+    resume.set()
+    worker.join(timeout=2)
+
+    assert not worker.is_alive()
+    assert len(decisions) == 1
+    assert decisions[0].allowed is False
+    assert decisions[0].reason_code == "production.not_ready"
+    assert enforcer.calls == 0
+
+
+def test_production_remote_backend_rejects_a_class_method_monkeypatch() -> None:
+    evaluator = OpaEvaluator(
+        "https://pdp.example.test/allow",
+        policy_version="remote-revision-7",
+        expected_policy_digest="remote-digest-7",
+    )
+    authz = _production_remote_authz(evaluator)
+    original = OpaEvaluator.__dict__["_encode_payload"]
+    OpaEvaluator._encode_payload = lambda _self, _request: {"unsafe": True}
+    try:
+        decision = authz.can(
+            Subject(id="alice", tenant_id="acme"),
+            operation="document.read",
+            resource_type="document",
+            resource_id="doc-1",
+        )
+        issues = {item["code"] for item in authz.readiness()["issues"]}
+    finally:
+        OpaEvaluator._encode_payload = original
+
+    assert not decision.allowed
+    assert decision.reason_code == "backend.not_production_ready"
+    assert "backend.production_class_modified" in issues
+
+
+def test_production_relation_backends_reject_an_operation_map_class_monkeypatch() -> None:
+    evaluator = OpenFgaEvaluator(
+        "https://pdp.example.test/allow",
+        policy_version="remote-revision-7",
+        expected_policy_digest="remote-digest-7",
+        operation_map={"document.read": "viewer"},
+    )
+    authz = _production_remote_authz(evaluator)
+    original = OperationMap.__call__
+    OperationMap.__call__ = lambda _self, _request: "owner"
+    try:
+        decision = authz.can(
+            Subject(id="alice", tenant_id="acme"),
+            operation="document.read",
+            resource_type="document",
+            resource_id="doc-1",
+        )
+        issues = {item["code"] for item in authz.readiness()["issues"]}
+    finally:
+        OperationMap.__call__ = original
+
+    assert not decision.allowed
+    assert decision.reason_code == "backend.not_production_ready"
+    assert "backend.remote_configuration_mutated" in issues
+
+
+def test_production_casbin_rejects_a_mutable_request_builder() -> None:
+    class Enforcer:
+        def enforce(self, *_args) -> bool:
+            return True
+
+    class MutableBuilder:
+        def __init__(self) -> None:
+            self.operation = "document.read"
+
+        def __call__(self, request) -> tuple[str, str, str]:
+            return (request.subject.id, request.resource.uri, self.operation)
+
+    builder = MutableBuilder()
+    evaluator = CasbinEvaluator(Enforcer(), request_builder=builder)
+    builder.operation = "document.delete"
+    authz = _production_remote_authz(evaluator)
+
+    decision = authz.can(
+        Subject(id="alice", tenant_id="acme"),
+        operation="document.read",
+        resource_type="document",
+        resource_id="doc-1",
+    )
+
+    assert not decision.allowed
+    assert decision.reason_code == "backend.not_production_ready"
+    assert "backend.casbin_production_request_template_required" in {
+        item["code"] for item in authz.readiness()["issues"]
+    }
+
+
+def test_production_casbin_accepts_a_static_request_template() -> None:
+    class Enforcer:
+        def __init__(self) -> None:
+            self.arguments: tuple[object, ...] = ()
+
+        def enforce(self, *arguments) -> bool:
+            self.arguments = arguments
+            return True
+
+    enforcer = Enforcer()
+    evaluator = CasbinEvaluator(
+        enforcer,
+        request_fields=("subject.id", "resource.uri", "operation"),
+    )
+    authz = _production_remote_authz(evaluator)
+
+    decision = authz.can(
+        Subject(id="alice", tenant_id="acme"),
+        operation="document.read",
+        resource_type="document",
+        resource_id="doc-1",
+    )
+
+    assert decision.allowed
+    assert enforcer.arguments == ("alice", "document:doc-1", "document.read")
+    assert isinstance(evaluator.request_builder, CasbinRequestTemplate)
+    with pytest.raises(AttributeError, match="configuration is immutable"):
+        evaluator.request_builder = lambda _request: ()
+
+
+@pytest.mark.parametrize(
+    "enforcer_result",
+    ("False", {"allowed": False}, [False], ("False", "details")),
+)
+def test_production_casbin_rejects_non_boolean_enforcer_results(
+    enforcer_result,
+) -> None:
+    class Enforcer:
+        def enforce(self, *_args):
+            return enforcer_result
+
+    authz = _production_remote_authz(
+        CasbinEvaluator(
+            Enforcer(),
+            request_fields=("subject.id", "resource.uri", "operation"),
+        )
+    )
+
+    decision = authz.can(
+        Subject(id="alice", tenant_id="acme"),
+        operation="document.read",
+        resource_type="document",
+        resource_id="doc-1",
+    )
+
+    assert decision.allowed is False
+    assert decision.reason_code == "casbin.error"
 
 
 def test_production_casbin_rejects_a_post_construction_enforcer_swap() -> None:
@@ -998,6 +1452,29 @@ def test_relation_backend_operation_mapping_must_match_its_target_grammar(factor
     assert decision.reason_code == f"{evaluator.name}.error"
 
 
+@pytest.mark.parametrize(
+    ("factory", "invalid_mapping", "backend", "field"),
+    (
+        (OpenFgaEvaluator, "not valid", "OpenFGA", "relation"),
+        (SpiceDbEvaluator, "not valid", "SpiceDB", "permission"),
+    ),
+)
+def test_relation_backends_reject_invalid_static_operation_maps_at_construction(
+    factory,
+    invalid_mapping: str,
+    backend: str,
+    field: str,
+) -> None:
+    with pytest.raises(
+        ValueError,
+        match=rf"{backend} operation_map contains invalid {field} values",
+    ):
+        factory(
+            "https://pdp.example.test/check",
+            operation_map={"document.read": invalid_mapping},
+        )
+
+
 @pytest.mark.parametrize("mapping", ["_", "_a", "trailing_"])
 def test_spicedb_operation_mapping_rejects_invalid_identifier_shapes(mapping):
     evaluator = SpiceDbEvaluator(
@@ -1065,3 +1542,46 @@ def test_cerbos_selects_the_requested_action_from_multi_action_response():
 
     assert decision.allowed is False
     assert decision.reason_code == "cerbos.deny"
+
+
+@pytest.mark.parametrize(
+    "response_body",
+    (
+        {"resourceInstances": {"doc-evil": {"actions": {"document.read": "EFFECT_ALLOW"}}}},
+        {"resourceInstances": {"doc-1": {"actions": {"document.delete": "EFFECT_ALLOW"}}}},
+        {"allow": True},
+    ),
+)
+def test_production_cerbos_rejects_an_allow_not_bound_to_the_requested_coordinate(
+    monkeypatch: pytest.MonkeyPatch,
+    response_body: dict[str, object],
+) -> None:
+    """A correct transport envelope cannot make an unrelated Cerbos allow valid."""
+
+    evaluator = CerbosEvaluator(
+        "https://pdp.example.test/check",
+        policy_version="remote-revision-7",
+        expected_policy_digest="remote-digest-7",
+    )
+
+    def transport(_endpoint, _payload, headers, _timeout, **_kwargs):
+        return {
+            **response_body,
+            "request_id": headers["x-authz-request-id"],
+            "trace_id": headers.get("x-authz-trace-id", ""),
+            "contract_version": headers["x-authz-contract-version"],
+            "catalog_fingerprint": headers["x-authz-catalog-fingerprint"],
+            "policy_version": headers["x-authz-policy-version"],
+            "policy_digest": headers["x-authz-policy-digest"],
+        }
+
+    monkeypatch.setattr("authz_sdk.backends._urllib_transport", transport)
+    decision = _production_remote_authz(evaluator).can(
+        Subject(id="alice", tenant_id="acme"),
+        operation="document.read",
+        resource_type="document",
+        resource_id="doc-1",
+    )
+
+    assert decision.allowed is False
+    assert decision.reason_code != "cerbos.allow"

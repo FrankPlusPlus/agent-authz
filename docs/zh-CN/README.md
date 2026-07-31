@@ -28,19 +28,19 @@ Agent Authz 是嵌入式 Python 授权 PEP。你的服务提供已经验证的�
 未验证的包名。下载 wheel 时一并下载校验和：
 
 ~~~bash
-gh release download v0.7.0b2 --repo FrankPlusPlus/agent-authz \
-  --pattern 'agent_authz_sdk-0.7.0b2-py3-none-any.whl' --pattern WHEEL-SHA256SUMS
+gh release download v0.7.0b3 --repo FrankPlusPlus/agent-authz \
+  --pattern 'agent_authz_sdk-0.7.0b3-py3-none-any.whl' --pattern WHEEL-SHA256SUMS
 shasum -a 256 -c WHEEL-SHA256SUMS
-gh attestation verify agent_authz_sdk-0.7.0b2-py3-none-any.whl \
+gh attestation verify agent_authz_sdk-0.7.0b3-py3-none-any.whl \
   -R FrankPlusPlus/agent-authz
-python -m pip install --no-deps agent_authz_sdk-0.7.0b2-py3-none-any.whl
+python -m pip install --no-deps agent_authz_sdk-0.7.0b3-py3-none-any.whl
 ~~~
 
 若希望透明地审查源码并运行完整证明，可使用该 release tag 做开发和源码审查。Git tag
 不是按内容寻址的发布证明；部署发布物时仍应先验证上面的 release wheel：
 
 ~~~bash
-git clone --branch v0.7.0b2 https://github.com/FrankPlusPlus/agent-authz.git
+git clone --branch v0.7.0b3 https://github.com/FrankPlusPlus/agent-authz.git
 cd agent-authz
 python -m venv .venv
 . .venv/bin/activate
@@ -59,7 +59,7 @@ python examples/secure_document_agent.py
 若在开发或源码审查中以审查过的 tag 作为源码依赖安装（不作为发布完整性证明）：
 
 ~~~bash
-python -m pip install "agent-authz-sdk @ git+https://github.com/FrankPlusPlus/agent-authz.git@v0.7.0b2"
+python -m pip install "agent-authz-sdk @ git+https://github.com/FrankPlusPlus/agent-authz.git@v0.7.0b3"
 ~~~
 
 **从这里开始：** [保护 MCP Tool](../mcp.md) ·
@@ -172,7 +172,7 @@ def read_document(*, subject, document_id):
 | FastAPI | 可用，可选依赖 | 路由处理器执行前的 dependency guard | 宿主提供验证后的请求身份 |
 | MCP Python SDK v2 | Beta，可选依赖 | 已登记 Tool callable 执行前的最终 guard | 不包含 MCP OAuth、同意、限流或动态 tools/list 过滤 |
 | Agno / LangGraph | 基础 callable wrapper | Tool/node 执行前的 guard | 不是原生框架插件；未覆盖 checkpoint、handoff、streaming |
-| Casbin | 可用，可选依赖 | 在统一 contract 后复用已有 enforcer | Casbin 继续拥有模型和策略存储 |
+| Casbin | 可用，可选依赖 | 在统一 contract 后复用已有 enforcer；生产环境支持默认或静态请求模板 | Casbin 继续拥有模型和策略存储 |
 | OPA / Cerbos | 实验性 starter transport | 远程决策的 PoC | 不是官方/完整 client；没有异步连接池、重试或控制平面 |
 | OpenFGA / SpiceDB | 实验性；生产环境必须静态显式映射 | 远程 relation/permission 检查的 PoC | 宿主把业务操作映射为合法 relation/permission，并负责模型/版本语义 |
 | RAG CandidateFilter | 可用原语 | 候选进入 prompt 前过滤 | 不会自动做 SQL/向量 pushdown，也无法证明每个检索路径都已接入 |

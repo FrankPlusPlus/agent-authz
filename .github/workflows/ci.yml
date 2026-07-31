@@ -41,6 +41,10 @@ jobs:
           python -m venv /tmp/agent-authz-wheel
           /tmp/agent-authz-wheel/bin/python -m pip install --no-deps dist/*.whl
           /tmp/agent-authz-wheel/bin/python -c "from importlib.metadata import version; import authz_sdk; assert authz_sdk.__version__ == version('agent-authz-sdk')"
+          (
+            cd /tmp/agent-authz-wheel
+            /tmp/agent-authz-wheel/bin/python "$GITHUB_WORKSPACE/scripts/verify_documentation_examples.py" "$GITHUB_WORKSPACE"
+          )
           python -m venv /tmp/agent-authz-sdist
           /tmp/agent-authz-sdist/bin/python -m pip install --no-deps dist/*.tar.gz
           /tmp/agent-authz-sdist/bin/python -c "from importlib.metadata import version; import authz_sdk; assert authz_sdk.__version__ == version('agent-authz-sdk')"

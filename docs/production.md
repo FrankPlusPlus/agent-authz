@@ -53,6 +53,37 @@ value is deliberately only a local enforcement-boundary result;
 `operational_ready` is `None` because the SDK cannot certify your KMS, shared
 stores, rollout, audit retention, or host-path coverage.
 
+After construction, a production facade and its accepted evaluator reject
+ordinary attribute assignment and deletion, including new attributes and
+`__class__` changes. The SDK also records a production facade's construction
+identity outside its instance dictionary, so a low-level pre-request edit of
+`profile` or `_production_profile` cannot downgrade it into the native/default
+allow path. The inherited `Authz.can()` path also determines that mode through
+the non-virtual sidecar check, so an ordinary same-layout subclass swap that
+overrides `is_production` is detected before any collaborator runs. Ordinary
+production attribute lookup also pins the SDK entrypoints to reviewed `Authz`
+methods, so an instance-dictionary shadow of `can`, `_can`, or
+`_finalize_decision` cannot replace the enforcement path.
+`Authz.production(...)` and direct `profile="production"` construction require
+the exact `Authz` facade type; use composition rather than a subclass for
+custom behavior. Each request
+captures the complete production boundary (catalog, policies, resource registry,
+evaluator, audit collaborators, and profile switches) before catalog/resource
+work, revalidates it before the decision and before an allow returns, and
+invokes the reviewed evaluator surface rather than rediscovering a backend
+through a mutable attribute. Build a new
+`Authz.production(...)` facade when configuration changes; this prevents a
+partial hot-reload from silently changing the authority used by an in-flight
+request. These runtime checks are fail-closed guards for accidental,
+deserialized, or low-level instance-state changes **when the reviewed SDK
+entrypoint is invoked**. They are not a Python-process sandbox: hostile code
+that deliberately replaces `__class__` with a type overriding
+`__getattribute__`, bypasses normal attribute dispatch, replaces SDK
+class/module state, or directly executes the side effect is outside this
+boundary. Put
+untrusted plugins in a separate process and use a remote PDP/PEP boundary when
+that is part of your threat model.
+
 ## Prove declared Agent entrypoints are guarded
 
 Use `CoverageManifest` once the catalog has more than a single route. It

@@ -54,7 +54,7 @@ checks are not assembled manually.
 Install the optional dependency:
 
 ```bash
-python -m pip install "agent-authz-sdk[casbin] @ git+https://github.com/FrankPlusPlus/agent-authz.git@v0.7.0b2"
+python -m pip install "agent-authz-sdk[casbin] @ git+https://github.com/FrankPlusPlus/agent-authz.git@v0.7.0b3"
 ```
 
 Create a normal Casbin enforcer and put it behind the same Authz facade:
@@ -115,8 +115,35 @@ independently, so `Resource("document", "doc:1")` cannot collide with
 `document:doc%3A1` and `document%3Adoc:1`, respectively. If an existing Casbin model persisted a raw colon-joined
 object key, pass a deliberate `request_builder` during migration and test the
 old/new mapping; do not parse `resource.uri` back into business fields. For a
-custom matcher, pass a `request_builder` that returns the arguments your model
-expects. This is an escape hatch, not a second Authz policy language.
+custom matcher, use a static field template in production instead of an
+arbitrary Python callback:
+
+```python
+evaluator = CasbinEvaluator(
+    enforcer,
+    # Example four-argument model: subject, canonical resource, action, domain.
+    request_fields=(
+        "subject.id",
+        "resource.uri",
+        "operation",
+        "subject.tenant_id",
+    ),
+)
+```
+
+`request_fields=` builds an immutable `CasbinRequestTemplate`; it supports the
+named fields above plus explicit `context.<key>`, `arguments.<key>`,
+`subject.metadata.<key>`, `resource.attributes.<key>`,
+`resource.relations.<key>`, and `literal:<value>` selectors. The default
+three-field request and these templates are production-ready. A callable
+`request_builder=` remains a development/migration escape hatch, but
+`Authz.production()` rejects it because mutable closure or object state can
+change a live matcher request without changing callable identity.
+
+At evaluation time, `CasbinEvaluator` accepts only a boolean decision (or a
+tuple whose first item is a boolean). A truthy string, mapping, list, or other
+nonstandard adapter result is treated as a backend error and denied rather
+than being coerced into an allow.
 
 ## Remote PDPs
 
@@ -125,6 +152,13 @@ OpenFGA, SpiceDB, and an AuthZEN-style endpoint. They use the standard library
 by default and accept an injected transport for tests; they are not official,
 feature-complete clients. A starter adapter is useful for a local proof of
 concept, not evidence of compatibility with every feature of that backend.
+
+`CerbosEvaluator` currently targets the legacy single-resource Check response
+shape (`resourceInstances`), not the newer
+[`CheckResources`](https://docs.cerbos.dev/cerbos/latest/api/reference.html)
+result-list API.
+Keep it behind a compatible gateway or contribute a reviewed current-API
+adapter before treating it as a production Cerbos integration.
 
 ```python
 from authz_sdk import Authz, OpaEvaluator
@@ -179,6 +213,13 @@ All remote adapters have the following baseline guarantees:
 - the adapter does not silently turn a policy-engine decision into a data
   query or side effect.
 
+For the Cerbos starter adapter, the decision must additionally bind to the
+requested coordinate inside `resourceInstances`: Agent Authz reads only
+`resourceInstances[resource.id].actions[operation]`. An allow for another
+resource, another action, or a generic top-level `allow` is not reused for the
+current request and fails closed. This is intentionally narrower than a generic
+JSON boolean decoder because a Cerbos response can contain several decisions.
+
 The response parser accepts the common `allow`, `allowed`, `authorized`,
 `permitted`, `result`, and backend-specific permission-status shapes. A normal
 development adapter may return only one of those fields. A production-profile
@@ -215,8 +256,11 @@ authority path until it has reviewed, contract-tested payload and decision
 adapters.
 
 Production readiness also detects post-construction changes to the PDP endpoint,
-transport, payload encoder, decision decoder, headers, timeout, projection, or
-policy binding. If any of those configured values drift, the production boundary
+transport, payload encoder, decision decoder, headers, timeout, projection,
+custom TLS-context security state, or policy binding. Projection instances and
+mapping inputs are copied into SDK-owned immutable values, so mutating the
+configuration object that was passed to an evaluator cannot silently change a
+live production request. If any configured value drifts, the production boundary
 denies before opening a PDP connection; create a new reviewed evaluator instead
 of mutating a live one.
 
@@ -277,9 +321,11 @@ production-ready, static operation-to-relation/permission contract.
 The OpenFGA mapping must return a relation made only of letters, digits,
 underscores, or hyphens. The SpiceDB mapping must return a 3–64 character
 lowercase identifier that starts with a letter or underscore, ends
-alphanumeric, and otherwise uses letters, digits, or underscores. This validates naming
-only; your model, tuple schema, consistency semantics, and official client
-compatibility remain the host's responsibility.
+alphanumeric, and otherwise uses letters, digits, or underscores. A malformed
+declarative `operation_map` is rejected while the evaluator is constructed,
+before production readiness can report ready. This validates naming only; your
+model, tuple schema, consistency semantics, and official client compatibility
+remain the host's responsibility.
 
 ## Agent code does not change
 

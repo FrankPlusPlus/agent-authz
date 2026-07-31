@@ -31,7 +31,7 @@ server capability rather than just an in-process callable.
 For a real HTTP boundary, install the optional extra:
 
 ```bash
-python -m pip install "agent-authz-sdk[fastapi] @ git+https://github.com/FrankPlusPlus/agent-authz.git@v0.7.0b2"
+python -m pip install "agent-authz-sdk[fastapi] @ git+https://github.com/FrankPlusPlus/agent-authz.git@v0.7.0b3"
 ```
 
 `FastAPIAuthz` turns a registered API entrypoint into a dependency. The
@@ -75,7 +75,7 @@ template [`fastapi_document_agent.py`](../examples/fastapi_document_agent.py).
 Install the optional official MCP v2 SDK integration:
 
 ```bash
-python -m pip install "agent-authz-sdk[mcp] @ git+https://github.com/FrankPlusPlus/agent-authz.git@v0.7.0b2"
+python -m pip install "agent-authz-sdk[mcp] @ git+https://github.com/FrankPlusPlus/agent-authz.git@v0.7.0b3"
 ```
 
 Bind the public MCP Tool name in `Catalog`, then register the Tool through
