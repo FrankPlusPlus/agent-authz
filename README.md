@@ -31,12 +31,12 @@ Until PyPI publishing is explicitly enabled, use the checked GitHub Release
 wheel—not an unverified package name. Download its checksum alongside it:
 
 ~~~bash
-gh release download v0.7.0b1 --repo FrankPlusPlus/agent-authz \
-  --pattern 'agent_authz_sdk-0.7.0b1-py3-none-any.whl' --pattern WHEEL-SHA256SUMS
+gh release download v0.7.0b2 --repo FrankPlusPlus/agent-authz \
+  --pattern 'agent_authz_sdk-0.7.0b2-py3-none-any.whl' --pattern WHEEL-SHA256SUMS
 shasum -a 256 -c WHEEL-SHA256SUMS
-gh attestation verify agent_authz_sdk-0.7.0b1-py3-none-any.whl \
+gh attestation verify agent_authz_sdk-0.7.0b2-py3-none-any.whl \
   -R FrankPlusPlus/agent-authz
-python -m pip install --no-deps agent_authz_sdk-0.7.0b1-py3-none-any.whl
+python -m pip install --no-deps agent_authz_sdk-0.7.0b2-py3-none-any.whl
 ~~~
 
 For a transparent integration checkout and executable proof, use the release
@@ -44,7 +44,7 @@ tag for development and source review. A Git tag is not a content-addressed
 release proof; verify the release wheel above for a deployed artifact:
 
 ~~~bash
-git clone --branch v0.7.0b1 https://github.com/FrankPlusPlus/agent-authz.git
+git clone --branch v0.7.0b2 https://github.com/FrankPlusPlus/agent-authz.git
 cd agent-authz
 python -m venv .venv
 . .venv/bin/activate
@@ -61,7 +61,7 @@ For a reviewed source-tag dependency during development or source review (not
 as a release-integrity proof):
 
 ~~~bash
-python -m pip install "agent-authz-sdk @ git+https://github.com/FrankPlusPlus/agent-authz.git@v0.7.0b1"
+python -m pip install "agent-authz-sdk @ git+https://github.com/FrankPlusPlus/agent-authz.git@v0.7.0b2"
 ~~~
 
 **Start here:** [Protect an MCP Tool](docs/mcp.md) ·

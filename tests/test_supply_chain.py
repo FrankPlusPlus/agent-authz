@@ -141,3 +141,13 @@ def test_release_workflow_uses_hash_locked_read_only_build_and_separate_publish(
     assert "rm -rf dist" in verify_job
     assert 'test "$(find dist -mindepth 1 -maxdepth 1 -type f | wc -l | tr -d \' \')" = "2"' in verify_job
     assert 'test "$(find . -mindepth 1 -maxdepth 1 -type f | wc -l | tr -d \' \')" = "6"' in publish_job
+
+
+def test_ci_verifies_the_linux_release_lock_before_a_tag_is_created() -> None:
+    root = Path(__file__).parents[1]
+    workflow = (root / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+
+    assert "release-lock:" in workflow
+    assert 'name: Release lock (3.13)' in workflow
+    assert "python -m pip install --require-hashes -r requirements/release.txt" in workflow
+    assert "python -m pip install --no-deps --no-build-isolation ." in workflow

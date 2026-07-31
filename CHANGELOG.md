@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented here.
 
+## 0.7.0b2 - 2026-07-31
+
+- Fixed the GitHub Linux release lock by explicitly pinning the conditional
+  `SecretStorage` / `jeepney` dependency pulled through `twine` and `keyring`.
+  CI now verifies the hash-locked release environment on Linux before a tag can
+  be created.
+
 ## 0.7.0b1 - 2026-07-31
 
 - Closed production-boundary bypasses found in independent pre-release review:
