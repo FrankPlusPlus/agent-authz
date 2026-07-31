@@ -1,0 +1,30 @@
+name: Bug report
+description: Report a reproducible Agent Authz defect (not a security vulnerability).
+title: "bug: "
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Do not report undisclosed security vulnerabilities here. Use the private
+        vulnerability-reporting flow described in SECURITY.md.
+  - type: input
+    id: version
+    attributes:
+      label: SDK version
+      placeholder: "0.7.0"
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Minimal reproduction
+      description: Remove credentials, real subject/resource IDs, prompts, and retrieved content.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected and actual behavior
+    validations:
+      required: true

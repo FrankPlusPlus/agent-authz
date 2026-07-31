@@ -1,0 +1,110 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.13"
+      - name: Install hash-locked release dependencies
+        run: |
+          python -m pip install --require-hashes -r requirements/release.txt
+          python -m pip install --no-deps --no-build-isolation .
+      - name: Verify tag matches package version and protected main history
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          python -c "import os; from importlib.metadata import version; assert os.environ['RELEASE_TAG'] == 'v' + version('agent-authz-sdk'), 'tag must equal v' + version('agent-authz-sdk')"
+          git fetch --no-tags origin main
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" "origin/main"; then
+            echo "release tag must reference a commit reachable from protected main" >&2
+            exit 1
+          fi
+      - name: Test and build
+        run: |
+          rm -rf dist
+          python -m pytest
+          python -m pip check
+          python -m build --no-isolation
+          python scripts/verify_distribution.py dist
+          python -m twine check dist/*.whl dist/*.tar.gz
+          test "$(find dist -mindepth 1 -maxdepth 1 -type f | wc -l | tr -d ' ')" = "2"
+      - name: Generate SPDX SBOMs
+        run: |
+          python scripts/generate_sbom.py dist/*.whl --output dist/agent-authz-sdk-wheel.spdx.json
+          python scripts/generate_sbom.py dist/*.tar.gz --output dist/agent-authz-sdk-sdist.spdx.json
+          test "$(find dist -mindepth 1 -maxdepth 1 -type f | wc -l | tr -d ' ')" = "4"
+      - name: Generate release checksums
+        working-directory: dist
+        run: |
+          sha256sum *.whl *.tar.gz *.spdx.json > SHA256SUMS
+          sha256sum *.whl > WHEEL-SHA256SUMS
+          test "$(find . -mindepth 1 -maxdepth 1 -type f | wc -l | tr -d ' ')" = "6"
+      - name: Verify the documented wheel-only download check
+        run: |
+          release_download_dir="$(mktemp -d)"
+          cp dist/*.whl dist/WHEEL-SHA256SUMS "$release_download_dir/"
+          (
+            cd "$release_download_dir"
+            sha256sum -c WHEEL-SHA256SUMS
+          )
+      - name: Upload verified release assets
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: verified-release-assets
+          path: dist/
+          if-no-files-found: error
+          retention-days: 7
+
+  attest-and-release:
+    needs: verify
+    runs-on: ubuntu-latest
+    environment:
+      name: release
+    permissions:
+      contents: write
+      attestations: write
+      id-token: write
+    steps:
+      - name: Download verified release assets
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: verified-release-assets
+          path: dist
+      - name: Recheck verified release assets
+        working-directory: dist
+        run: |
+          test "$(find . -mindepth 1 -maxdepth 1 -type f | wc -l | tr -d ' ')" = "6"
+          sha256sum -c SHA256SUMS
+          sha256sum -c WHEEL-SHA256SUMS
+      - name: Attest release wheel and SBOM
+        uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4
+        with:
+          subject-path: dist/*.whl
+          sbom-path: dist/agent-authz-sdk-wheel.spdx.json
+      - name: Attest release source distribution and SBOM
+        uses: actions/attest@508db95dd578ae2727ebd6217d5ba78e4fbda05d # v4
+        with:
+          subject-path: dist/*.tar.gz
+          sbom-path: dist/agent-authz-sdk-sdist.spdx.json
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          gh release create "${{ github.ref_name }}"
+          dist/*.whl dist/*.tar.gz dist/*.spdx.json dist/SHA256SUMS dist/WHEEL-SHA256SUMS
+          --generate-notes --prerelease --verify-tag

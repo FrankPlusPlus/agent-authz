@@ -1,0 +1,31 @@
+include CHANGELOG.md
+include CONTRIBUTING.md
+include LICENSE
+include README.md
+include ROADMAP.md
+include SECURITY.md
+include SUPPLY_CHAIN.md
+include docs/agent-runtime.md
+include docs/architecture.md
+include docs/backends.md
+include docs/comparison.md
+include docs/coverage.md
+include docs/frameworks.md
+include docs/mcp.md
+include docs/migration.md
+include docs/production.md
+include docs/quickstart.md
+include docs/threat-model.md
+include docs/zh-CN/README.md
+recursive-include examples *.py
+recursive-include integrations *.py
+include py.typed
+prune tests
+global-exclude .DS_Store
+global-exclude .env
+global-exclude .env.*
+global-exclude *.key
+global-exclude *.pem
+global-exclude *.p12
+global-exclude *.pyc
+global-exclude __pycache__
