@@ -54,7 +54,7 @@ checks are not assembled manually.
 Install the optional dependency:
 
 ```bash
-python -m pip install "agent-authz-sdk[casbin] @ git+https://github.com/FrankPlusPlus/agent-authz.git@v0.7.0b1"
+python -m pip install "agent-authz-sdk[casbin] @ git+https://github.com/FrankPlusPlus/agent-authz.git@v0.7.0b2"
 ```
 
 Create a normal Casbin enforcer and put it behind the same Authz facade:

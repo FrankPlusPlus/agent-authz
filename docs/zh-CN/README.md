@@ -28,19 +28,19 @@ Agent Authz 是嵌入式 Python 授权 PEP。你的服务提供已经验证的�
 未验证的包名。下载 wheel 时一并下载校验和：
 
 ~~~bash
-gh release download v0.7.0b1 --repo FrankPlusPlus/agent-authz \
-  --pattern 'agent_authz_sdk-0.7.0b1-py3-none-any.whl' --pattern WHEEL-SHA256SUMS
+gh release download v0.7.0b2 --repo FrankPlusPlus/agent-authz \
+  --pattern 'agent_authz_sdk-0.7.0b2-py3-none-any.whl' --pattern WHEEL-SHA256SUMS
 shasum -a 256 -c WHEEL-SHA256SUMS
-gh attestation verify agent_authz_sdk-0.7.0b1-py3-none-any.whl \
+gh attestation verify agent_authz_sdk-0.7.0b2-py3-none-any.whl \
   -R FrankPlusPlus/agent-authz
-python -m pip install --no-deps agent_authz_sdk-0.7.0b1-py3-none-any.whl
+python -m pip install --no-deps agent_authz_sdk-0.7.0b2-py3-none-any.whl
 ~~~
 
 若希望透明地审查源码并运行完整证明，可使用该 release tag 做开发和源码审查。Git tag
 不是按内容寻址的发布证明；部署发布物时仍应先验证上面的 release wheel：
 
 ~~~bash
-git clone --branch v0.7.0b1 https://github.com/FrankPlusPlus/agent-authz.git
+git clone --branch v0.7.0b2 https://github.com/FrankPlusPlus/agent-authz.git
 cd agent-authz
 python -m venv .venv
 . .venv/bin/activate
@@ -59,7 +59,7 @@ python examples/secure_document_agent.py
 若在开发或源码审查中以审查过的 tag 作为源码依赖安装（不作为发布完整性证明）：
 
 ~~~bash
-python -m pip install "agent-authz-sdk @ git+https://github.com/FrankPlusPlus/agent-authz.git@v0.7.0b1"
+python -m pip install "agent-authz-sdk @ git+https://github.com/FrankPlusPlus/agent-authz.git@v0.7.0b2"
 ~~~
 
 **从这里开始：** [保护 MCP Tool](../mcp.md) ·
