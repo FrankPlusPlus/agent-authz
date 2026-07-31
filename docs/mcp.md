@@ -6,7 +6,7 @@ immediately before the registered Python Tool executes, while keeping MCP
 optional from the SDK's core dependency graph.
 
 ```bash
-python -m pip install "agent-authz-sdk[mcp] @ git+https://github.com/FrankPlusPlus/agent-authz.git@v0.7.0b2"
+python -m pip install "agent-authz-sdk[mcp] @ git+https://github.com/FrankPlusPlus/agent-authz.git@v0.7.0b3"
 ```
 
 The optional extra is currently constrained to `mcp>=2,<3`; the integration is

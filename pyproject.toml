@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "agent-authz-sdk"
-version = "0.7.0b2"
+version = "0.7.0b3"
 description = "A secure-by-default authorization PEP for APIs, Agent tools, RAG, and tasks"
 readme = "README.md"
 requires-python = ">=3.11"

@@ -1,8 +1,8 @@
 # Supply-chain and release policy
 
 Every public tag must reference a commit reachable from protected `main`, come
-from a green commit, and match the package version exactly (`v0.7.0b2` for
-package version `0.7.0b2`). The release workflow has two deliberately separated
+from a green commit, and match the package version exactly (`v0.7.0b3` for
+package version `0.7.0b3`). The release workflow has two deliberately separated
 jobs:
 
 1. a read-only `verify` job installs `requirements/release.txt` with
@@ -25,12 +25,12 @@ Consumers should download the release wheel and its checksum together, then
 verify both the bytes and GitHub's provenance:
 
 ```bash
-gh release download v0.7.0b2 --repo FrankPlusPlus/agent-authz \
-  --pattern 'agent_authz_sdk-0.7.0b2-py3-none-any.whl' --pattern WHEEL-SHA256SUMS
+gh release download v0.7.0b3 --repo FrankPlusPlus/agent-authz \
+  --pattern 'agent_authz_sdk-0.7.0b3-py3-none-any.whl' --pattern WHEEL-SHA256SUMS
 shasum -a 256 -c WHEEL-SHA256SUMS
-gh attestation verify agent_authz_sdk-0.7.0b2-py3-none-any.whl \
+gh attestation verify agent_authz_sdk-0.7.0b3-py3-none-any.whl \
   -R FrankPlusPlus/agent-authz
-python -m pip install --no-deps agent_authz_sdk-0.7.0b2-py3-none-any.whl
+python -m pip install --no-deps agent_authz_sdk-0.7.0b3-py3-none-any.whl
 ```
 
 No PyPI publishing occurs automatically. If maintainers later publish to
@@ -43,7 +43,7 @@ source review and development, but Git tags are not content-addressed pins and
 are not a substitute for verifying a release artifact:
 
 ```bash
-python -m pip install "agent-authz-sdk @ git+https://github.com/FrankPlusPlus/agent-authz.git@v0.7.0b2"
+python -m pip install "agent-authz-sdk @ git+https://github.com/FrankPlusPlus/agent-authz.git@v0.7.0b3"
 ```
 
 The bundled SBOM describes the built SDK distribution and its direct runtime

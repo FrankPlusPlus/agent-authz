@@ -19,6 +19,7 @@ from authz_sdk import (
     Resource,
     ResourceRegistry,
     Subject,
+    protect_tool,
 )
 
 
@@ -155,6 +156,25 @@ def test_tool_wrapper_resolves_a_trusted_resource_from_tool_arguments_in_product
     )
 
     assert guarded("doc-1") == "content"
+    assert calls == ["doc-1"]
+
+
+def test_protect_tool_supports_the_documented_decorator_form() -> None:
+    calls: list[str] = []
+    subject = Subject(id="alice", tenant_id="acme")
+
+    @protect_tool(
+        runtime=_production_runtime(),
+        operation="document.read",
+        subject=lambda call: call.kwargs["subject"],
+        resource_type="document",
+        resource_id=lambda call: call.kwargs["document_id"],
+    )
+    def read_document(*, subject: Subject, document_id: str) -> str:
+        calls.append(document_id)
+        return "content"
+
+    assert read_document(subject=subject, document_id="doc-1") == "content"
     assert calls == ["doc-1"]
 
 

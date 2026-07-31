@@ -43,6 +43,15 @@ jobs:
           python scripts/verify_distribution.py dist
           python -m twine check dist/*.whl dist/*.tar.gz
           test "$(find dist -mindepth 1 -maxdepth 1 -type f | wc -l | tr -d ' ')" = "2"
+      - name: Verify README guard examples against the built wheel
+        run: |
+          wheel_env="$(mktemp -d)"
+          python -m venv "$wheel_env"
+          "$wheel_env/bin/python" -m pip install --no-deps dist/*.whl
+          (
+            cd "$wheel_env"
+            "$wheel_env/bin/python" "$GITHUB_WORKSPACE/scripts/verify_documentation_examples.py" "$GITHUB_WORKSPACE"
+          )
       - name: Generate SPDX SBOMs
         run: |
           python scripts/generate_sbom.py dist/*.whl --output dist/agent-authz-sdk-wheel.spdx.json

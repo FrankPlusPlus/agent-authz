@@ -15,12 +15,14 @@ import ssl
 import urllib.error
 import urllib.parse
 import urllib.request
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
+from types import MappingProxyType
 from typing import Any
 
 from authz_sdk.evaluator import (
     BackendUnavailableError,
+    _REVIEWED_PRODUCTION_METHODS,
     _register_reviewed_production_evaluator,
 )
 from authz_sdk.models import AuthorizationRequest, Decision, Resource
@@ -52,8 +54,10 @@ class OperationMap:
     _entries: tuple[tuple[str, str], ...]
 
     def __init__(self, values: "OperationMap | Mapping[str, str]") -> None:
-        if isinstance(values, OperationMap):
-            entries = values._entries
+        if type(values) is _REVIEWED_OPERATION_MAP_TYPE:
+            entries = _operation_map_entries(values)
+            if entries is None:
+                raise ValueError("operation_map has an invalid immutable snapshot")
         else:
             if not isinstance(values, Mapping):
                 raise TypeError("operation_map must be a mapping of operation names to backend names")
@@ -86,6 +90,41 @@ class OperationMap:
         raise KeyError(f"operation_map has no entry for {request.operation!r}")
 
 
+_OPERATION_MAP_MISSING = object()
+_REVIEWED_OPERATION_MAP_TYPE = OperationMap
+_REVIEWED_OPERATION_MAP_CLASS_SLOTS = tuple(
+    (name, vars(OperationMap).get(name, _OPERATION_MAP_MISSING))
+    for name in ("__call__", "__getattribute__")
+)
+
+
+def _operation_map_entries(mapper: object) -> tuple[tuple[str, str], ...] | None:
+    """Read a static map's actual immutable entries without a public property."""
+
+    if type(mapper) is not _REVIEWED_OPERATION_MAP_TYPE:
+        return None
+    try:
+        entries = vars(mapper).get("_entries")
+    except TypeError:
+        return None
+    if not isinstance(entries, tuple):
+        return None
+    return entries
+
+
+def _is_reviewed_operation_map(mapper: object) -> bool:
+    """Return whether the frozen map and its executable class surface match import time."""
+
+    return (
+        type(mapper) is _REVIEWED_OPERATION_MAP_TYPE
+        and all(
+            vars(_REVIEWED_OPERATION_MAP_TYPE).get(name, _OPERATION_MAP_MISSING)
+            is expected
+            for name, expected in _REVIEWED_OPERATION_MAP_CLASS_SLOTS
+        )
+    )
+
+
 def _coerce_operation_mapper(
     operation_mapper: OperationMapper | Mapping[str, str] | None,
     operation_map: OperationMap | Mapping[str, str] | None,
@@ -97,11 +136,11 @@ def _coerce_operation_mapper(
     configured = operation_map if operation_map is not None else operation_mapper
     if configured is None:
         return None
-    if isinstance(configured, OperationMap):
+    if type(configured) is _REVIEWED_OPERATION_MAP_TYPE:
         # Copy even an existing map so this evaluator owns the frozen snapshot.
-        return OperationMap(configured)
+        return _REVIEWED_OPERATION_MAP_TYPE(configured)
     if isinstance(configured, Mapping):
-        return OperationMap(configured)
+        return _REVIEWED_OPERATION_MAP_TYPE(configured)
     if callable(configured):
         return configured
     raise TypeError("operation_mapper must be callable and operation_map must be a mapping")
@@ -139,6 +178,53 @@ def _verified_tls_context(context: ssl.SSLContext) -> bool:
         return bool(context.check_hostname) and context.verify_mode == ssl.CERT_REQUIRED
     except (AttributeError, TypeError):
         return False
+
+
+def _tls_context_security_snapshot(
+    context: ssl.SSLContext | None,
+) -> tuple[object, ...] | None:
+    """Capture the security-relevant state of a caller-supplied TLS context.
+
+    ``SSLContext`` is mutable through ordinary public methods such as
+    ``load_verify_locations`` and ``set_ciphers``. Its identity alone is not a
+    production seal: adding a new trust root after construction can change who
+    may impersonate a PDP while ``CERT_REQUIRED`` still appears intact. The
+    standard transport is owned by the SDK, but a supplied context needs this
+    structural drift check before each production decision.
+    """
+
+    if context is None:
+        return ()
+    if not isinstance(context, ssl.SSLContext):
+        return None
+    try:
+        certificates = tuple(sorted(bytes(item) for item in context.get_ca_certs(binary_form=True)))
+        ciphers = tuple(
+            sorted(
+                (
+                    str(cipher.get("name") or ""),
+                    str(cipher.get("protocol") or ""),
+                    int(cipher.get("strength_bits") or 0),
+                    int(cipher.get("alg_bits") or 0),
+                )
+                for cipher in context.get_ciphers()
+            )
+        )
+        return (
+            bool(context.check_hostname),
+            int(context.verify_mode),
+            int(context.verify_flags),
+            int(context.options),
+            int(context.minimum_version),
+            int(context.maximum_version),
+            bool(getattr(context, "hostname_checks_common_name", False)),
+            bool(getattr(context, "post_handshake_auth", False)),
+            str(getattr(context, "keylog_filename", "") or ""),
+            certificates,
+            ciphers,
+        )
+    except (AttributeError, TypeError, ValueError):
+        return None
 
 
 def _principal(request: AuthorizationRequest) -> str:
@@ -229,7 +315,21 @@ class PdpRequestProjection:
         if value is None:
             return cls()
         if isinstance(value, cls):
-            return value
+            # Do not retain a caller-owned instance, even though the base
+            # value object is frozen. A subclass or low-level mutation of a
+            # shared instance must not alter the fields sent by a production
+            # PDP after the evaluator has been accepted at the PEP boundary.
+            # Reconstructing the exact reviewed value type also normalizes
+            # every field into the immutable tuples used by the wire encoder.
+            return cls(
+                subject_field_keys=value.subject_field_keys,
+                subject_metadata_keys=value.subject_metadata_keys,
+                resource_attribute_keys=value.resource_attribute_keys,
+                resource_relation_keys=value.resource_relation_keys,
+                resource_metadata_keys=value.resource_metadata_keys,
+                context_keys=value.context_keys,
+                argument_keys=value.argument_keys,
+            )
         if not isinstance(value, Mapping):
             raise TypeError("projection must be a PdpRequestProjection or mapping")
         allowed = {
@@ -245,6 +345,62 @@ class PdpRequestProjection:
         if unknown:
             raise ValueError(f"unknown PDP projection fields: {', '.join(sorted(map(str, unknown)))}")
         return cls(**dict(value))
+
+
+_PROJECTION_FIELD_NAMES = (
+    "subject_field_keys",
+    "subject_metadata_keys",
+    "resource_attribute_keys",
+    "resource_relation_keys",
+    "resource_metadata_keys",
+    "context_keys",
+    "argument_keys",
+)
+_PROJECTION_MISSING = object()
+_REVIEWED_PROJECTION_TYPE = PdpRequestProjection
+_REVIEWED_PROJECTION_CLASS_SLOTS = tuple(
+    (name, vars(PdpRequestProjection).get(name, _PROJECTION_MISSING))
+    for name in ("__getattribute__",)
+)
+
+
+def _projection_snapshot(
+    projection: object,
+) -> tuple[tuple[str, ...], ...] | None:
+    """Return the exact immutable projection fields without dynamic lookup.
+
+    Production must not trust a subclass override or a mutable value returned
+    by an object's public properties. Reading the reviewed dataclass storage
+    directly gives the production configuration check a structural snapshot
+    that can detect a later low-level object-state change.
+    """
+
+    if type(projection) is not _REVIEWED_PROJECTION_TYPE:
+        return None
+    try:
+        values = vars(projection)
+    except TypeError:
+        return None
+    snapshot: list[tuple[str, ...]] = []
+    for field_name in _PROJECTION_FIELD_NAMES:
+        value = values.get(field_name)
+        if not isinstance(value, tuple) or any(not isinstance(item, str) for item in value):
+            return None
+        snapshot.append(value)
+    return tuple(snapshot)
+
+
+def _is_reviewed_projection(projection: object) -> bool:
+    """Return whether a projection retains its reviewed class surface."""
+
+    return (
+        type(projection) is _REVIEWED_PROJECTION_TYPE
+        and all(
+            vars(_REVIEWED_PROJECTION_TYPE).get(name, _PROJECTION_MISSING)
+            is expected
+            for name, expected in _REVIEWED_PROJECTION_CLASS_SLOTS
+        )
+    )
 
 
 def _resource_payload(
@@ -502,6 +658,175 @@ def _protocol_headers(
     return headers
 
 
+@dataclass(frozen=True, init=False)
+class CasbinRequestTemplate:
+    """Immutable declarative argument mapping for a Casbin request.
+
+    The default Casbin tuple is often sufficient.  Models that need a domain,
+    resource coordinate, or request context can use this class (or the
+    ergonomic ``request_fields=`` argument) without putting mutable Python
+    code on a production authorization path.
+
+    Supported fields are ``subject``, ``subject.id``, ``subject.email``,
+    ``subject.actor_type``, ``subject.tenant_id``, ``resource``,
+    ``resource.uri``, ``resource.type``, ``resource.id``, ``operation``, and
+    ``entrypoint``. Dynamic data must name its source explicitly with
+    ``context.<key>``, ``arguments.<key>``, ``subject.metadata.<key>``,
+    ``resource.attributes.<key>``, or ``resource.relations.<key>``. A fixed
+    value can use ``literal:<value>``.
+    """
+
+    _fields: tuple[str, ...]
+
+    def __init__(self, fields: "CasbinRequestTemplate | Iterable[str]") -> None:
+        if type(fields) is _REVIEWED_CASBIN_REQUEST_TEMPLATE_TYPE:
+            normalized = _casbin_template_fields(fields)
+            if normalized is None:
+                raise ValueError("Casbin request template has an invalid immutable snapshot")
+        else:
+            raw_fields: Iterable[str]
+            if isinstance(fields, str):
+                raw_fields = (fields,)
+            else:
+                raw_fields = fields
+            try:
+                normalized = tuple(
+                    _normalize_casbin_request_field(field)
+                    for field in raw_fields
+                )
+            except TypeError as exc:
+                raise TypeError("request_fields must be an iterable of field selectors") from exc
+            if not normalized:
+                raise ValueError("request_fields must include at least one field selector")
+        object.__setattr__(self, "_fields", normalized)
+
+    @property
+    def fields(self) -> tuple[str, ...]:
+        """Return immutable, normalized field selectors."""
+
+        return self._fields
+
+    def __call__(self, request: AuthorizationRequest) -> tuple[Any, ...]:
+        return tuple(_casbin_request_value(request, field) for field in self._fields)
+
+
+_CASBIN_TEMPLATE_MISSING = object()
+_REVIEWED_CASBIN_REQUEST_TEMPLATE_TYPE = CasbinRequestTemplate
+_REVIEWED_CASBIN_REQUEST_TEMPLATE_CLASS_SLOTS = tuple(
+    (name, vars(CasbinRequestTemplate).get(name, _CASBIN_TEMPLATE_MISSING))
+    for name in ("__call__", "__getattribute__")
+)
+_CASBIN_STATIC_FIELDS = frozenset(
+    {
+        "subject",
+        "subject.id",
+        "subject.email",
+        "subject.actor_type",
+        "subject.tenant_id",
+        "resource",
+        "resource.uri",
+        "resource.type",
+        "resource.id",
+        "operation",
+        "entrypoint",
+    }
+)
+_CASBIN_DYNAMIC_FIELD_PREFIXES = (
+    "context.",
+    "arguments.",
+    "subject.metadata.",
+    "resource.attributes.",
+    "resource.relations.",
+)
+
+
+def _normalize_casbin_request_field(value: object) -> str:
+    field = str(value or "").strip()
+    if field in _CASBIN_STATIC_FIELDS:
+        return field
+    if field.startswith("literal:"):
+        if field.removeprefix("literal:"):
+            return field
+    for prefix in _CASBIN_DYNAMIC_FIELD_PREFIXES:
+        if field.startswith(prefix) and field.removeprefix(prefix).strip():
+            return field
+    raise ValueError(f"unsupported Casbin request field selector: {field or '<empty>'}")
+
+
+def _casbin_request_value(request: AuthorizationRequest, field: str) -> Any:
+    subject = request.subject
+    resource = request.resource
+    if field == "subject":
+        return _principal(request)
+    if field == "subject.id":
+        return subject.id
+    if field == "subject.email":
+        return subject.email
+    if field == "subject.actor_type":
+        return subject.actor_type
+    if field == "subject.tenant_id":
+        return subject.tenant_id
+    if field == "resource" or field == "resource.uri":
+        return resource.uri if resource else request.operation
+    if field == "resource.type":
+        return resource.type if resource else ""
+    if field == "resource.id":
+        return resource.id if resource else ""
+    if field == "operation":
+        return request.operation
+    if field == "entrypoint":
+        return request.entrypoint
+    if field.startswith("literal:"):
+        return field.removeprefix("literal:")
+    if field.startswith("context."):
+        return request.context.get(field.removeprefix("context."), "")
+    if field.startswith("arguments."):
+        return request.arguments.get(field.removeprefix("arguments."), "")
+    if field.startswith("subject.metadata."):
+        return subject.metadata.get(field.removeprefix("subject.metadata."), "")
+    if field.startswith("resource.attributes."):
+        return (resource.attributes if resource else {}).get(
+            field.removeprefix("resource.attributes."),
+            "",
+        )
+    if field.startswith("resource.relations."):
+        return (resource.relations if resource else {}).get(
+            field.removeprefix("resource.relations."),
+            "",
+        )
+    raise ValueError(f"unsupported Casbin request field selector: {field}")
+
+
+def _casbin_template_fields(
+    builder: object,
+) -> tuple[str, ...] | None:
+    """Read a template's frozen selectors without a public property lookup."""
+
+    if type(builder) is not _REVIEWED_CASBIN_REQUEST_TEMPLATE_TYPE:
+        return None
+    try:
+        fields = vars(builder).get("_fields")
+    except TypeError:
+        return None
+    return fields if isinstance(fields, tuple) else None
+
+
+def _is_reviewed_casbin_request_template(builder: object) -> bool:
+    """Return whether a static Casbin template still has its reviewed call surface."""
+
+    return (
+        type(builder) is _REVIEWED_CASBIN_REQUEST_TEMPLATE_TYPE
+        and all(
+            vars(_REVIEWED_CASBIN_REQUEST_TEMPLATE_TYPE).get(
+                name,
+                _CASBIN_TEMPLATE_MISSING,
+            )
+            is expected
+            for name, expected in _REVIEWED_CASBIN_REQUEST_TEMPLATE_CLASS_SLOTS
+        )
+    )
+
+
 class CasbinEvaluator:
     """Evaluate a request using an existing Casbin ``Enforcer``.
 
@@ -513,23 +838,49 @@ class CasbinEvaluator:
 
     name = "casbin"
     enforcement_mode = "in_process"
+    def __setattr__(self, name: str, value: Any) -> None:
+        """Prevent normal public reconfiguration after a production PEP accepts us."""
+
+        if self.__dict__.get("_production_sealed", False):
+            raise AttributeError(
+                "production evaluator configuration is immutable; construct a new evaluator"
+            )
+        object.__setattr__(self, name, value)
+
+    def __delattr__(self, name: str) -> None:
+        """Keep the production seal effective for ordinary attribute deletion."""
+
+        if self.__dict__.get("_production_sealed", False):
+            raise AttributeError(
+                "production evaluator configuration is immutable; construct a new evaluator"
+            )
+        object.__delattr__(self, name)
 
     def __init__(
         self,
         enforcer: Any,
         *,
-        request_builder: RequestBuilder | None = None,
+        request_builder: RequestBuilder | CasbinRequestTemplate | None = None,
+        request_fields: CasbinRequestTemplate | Iterable[str] | None = None,
         policy_version: str = "",
     ) -> None:
         if not callable(getattr(enforcer, "enforce", None)):
             raise TypeError("CasbinEvaluator requires an object with enforce()")
+        self._production_sealed = False
         self.enforcer = enforcer
-        self.request_builder = request_builder or self.default_request
+        self.request_builder = _coerce_casbin_request_builder(
+            request_builder,
+            request_fields,
+        )
         self.policy_version = str(policy_version or "1")
         self._production_configuration = (
             self.enforcer,
             self.request_builder,
             self.policy_version,
+        )
+        self._production_request_builder = self.request_builder
+        self._production_request_fields = _casbin_template_fields(
+            self.request_builder
         )
 
     @staticmethod
@@ -546,7 +897,8 @@ class CasbinEvaluator:
         model_path: str,
         policy_path: str,
         *,
-        request_builder: RequestBuilder | None = None,
+        request_builder: RequestBuilder | CasbinRequestTemplate | None = None,
+        request_fields: CasbinRequestTemplate | Iterable[str] | None = None,
         policy_version: str = "",
     ) -> "CasbinEvaluator":
         try:
@@ -558,16 +910,23 @@ class CasbinEvaluator:
         return cls(
             casbin.Enforcer(model_path, policy_path),
             request_builder=request_builder,
+            request_fields=request_fields,
             policy_version=policy_version,
         )
+
+    def _seal_for_production(self) -> None:
+        """Freeze normal public configuration after the PEP captures this evaluator."""
+
+        object.__setattr__(self, "_production_sealed", True)
 
     def authorize(self, request: AuthorizationRequest) -> Decision:
         try:
             result = self.enforcer.enforce(*self.request_builder(request))
             if isinstance(result, tuple):
-                allowed = bool(result[0])
-            else:
-                allowed = bool(result)
+                result = result[0]
+            if not isinstance(result, bool):
+                raise TypeError("Casbin enforcer must return a bool or a tuple whose first value is bool")
+            allowed = result
             return _decision(
                 request,
                 allowed,
@@ -603,10 +962,48 @@ class CasbinEvaluator:
             and self.request_builder is configured[1]
             and self.policy_version == configured[2]
         )
+        issues: list[str] = []
+        if not intact:
+            issues.append("backend.in_process_configuration_mutated")
+        builder = self._production_request_builder
+        if builder is _REVIEWED_CASBIN_DEFAULT_REQUEST:
+            pass
+        elif type(builder) is _REVIEWED_CASBIN_REQUEST_TEMPLATE_TYPE:
+            if (
+                not _is_reviewed_casbin_request_template(builder)
+                or _casbin_template_fields(builder)
+                != self._production_request_fields
+            ):
+                issues.append("backend.in_process_configuration_mutated")
+        else:
+            issues.append("backend.casbin_production_request_template_required")
         return {
-            "ready": intact,
-            "issues": () if intact else ("backend.in_process_configuration_mutated",),
+            "ready": not issues,
+            "issues": tuple(issues),
         }
+
+
+_REVIEWED_CASBIN_DEFAULT_REQUEST = CasbinEvaluator.default_request
+
+
+def _coerce_casbin_request_builder(
+    request_builder: RequestBuilder | CasbinRequestTemplate | None,
+    request_fields: CasbinRequestTemplate | Iterable[str] | None,
+) -> RequestBuilder | CasbinRequestTemplate:
+    """Normalize Casbin's default, a static template, or the development escape hatch."""
+
+    if request_builder is not None and request_fields is not None:
+        raise TypeError("pass either request_builder or request_fields, not both")
+    configured = request_fields if request_fields is not None else request_builder
+    if configured is None:
+        return _REVIEWED_CASBIN_DEFAULT_REQUEST
+    if type(configured) is _REVIEWED_CASBIN_REQUEST_TEMPLATE_TYPE:
+        return _REVIEWED_CASBIN_REQUEST_TEMPLATE_TYPE(configured)
+    if request_fields is not None:
+        return _REVIEWED_CASBIN_REQUEST_TEMPLATE_TYPE(request_fields)
+    if callable(configured):
+        return configured
+    raise TypeError("request_builder must be callable and request_fields must be an iterable")
 
 
 class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
@@ -692,6 +1089,23 @@ class JsonPdpEvaluator:
     """
 
     name = "json_pdp"
+    def __setattr__(self, name: str, value: Any) -> None:
+        """Prevent normal public reconfiguration after the PEP captures this adapter."""
+
+        if self.__dict__.get("_production_sealed", False):
+            raise AttributeError(
+                "production evaluator configuration is immutable; construct a new evaluator"
+            )
+        object.__setattr__(self, name, value)
+
+    def __delattr__(self, name: str) -> None:
+        """Keep the production seal effective for ordinary attribute deletion."""
+
+        if self.__dict__.get("_production_sealed", False):
+            raise AttributeError(
+                "production evaluator configuration is immutable; construct a new evaluator"
+            )
+        object.__delattr__(self, name)
 
     def __init__(
         self,
@@ -713,6 +1127,7 @@ class JsonPdpEvaluator:
     ) -> None:
         if not str(endpoint or "").strip():
             raise ValueError("PDP endpoint is required")
+        self._production_sealed = False
         self.endpoint = str(endpoint).strip()
         endpoint_parts = urllib.parse.urlsplit(self.endpoint)
         if endpoint_parts.scheme not in {"http", "https"} or not endpoint_parts.hostname:
@@ -744,6 +1159,8 @@ class JsonPdpEvaluator:
             "standard_tls" if self._uses_standard_transport else normalized_transport_security
         )
         self.ssl_context = ssl_context
+        if self.ssl_context is not None and not isinstance(self.ssl_context, ssl.SSLContext):
+            raise TypeError("ssl_context must be an ssl.SSLContext")
         if (
             self._uses_standard_transport
             and self.ssl_context is not None
@@ -762,6 +1179,12 @@ class JsonPdpEvaluator:
             )
         )
         self.projection = PdpRequestProjection.coerce(projection)
+        projection_snapshot = _projection_snapshot(self.projection)
+        if projection_snapshot is None or not _is_reviewed_projection(self.projection):
+            raise ValueError("projection must resolve to the reviewed immutable projection type")
+        tls_context_snapshot = _tls_context_security_snapshot(self.ssl_context)
+        if tls_context_snapshot is None:
+            raise ValueError("ssl_context security configuration could not be inspected")
         self._custom_encoder = encoder
         # ``projection_enforced`` existed while custom encoders could
         # self-attest their safety. Keep accepting it for source compatibility,
@@ -772,7 +1195,7 @@ class JsonPdpEvaluator:
         )
         self._custom_decoder = decoder
         self.decoder = decoder or _find_allowed
-        self.headers = _validated_configured_headers(headers)
+        self.headers = MappingProxyType(_validated_configured_headers(headers))
         self.timeout = float(timeout)
         if self.timeout <= 0:
             raise ValueError("PDP timeout must be greater than zero")
@@ -799,11 +1222,18 @@ class JsonPdpEvaluator:
             self.expected_policy_digest,
             self.policy_version,
             self.projection,
+            projection_snapshot,
             self.ssl_context,
+            tls_context_snapshot,
             self.allowed_hosts,
             self.transport_security,
             self._uses_standard_transport,
         )
+
+    def _seal_for_production(self) -> None:
+        """Freeze normal public configuration after the PEP captures this adapter."""
+
+        object.__setattr__(self, "_production_sealed", True)
 
     def production_readiness(self) -> Mapping[str, object]:
         """Return machine-readable requirements for a production remote PDP.
@@ -857,11 +1287,14 @@ class JsonPdpEvaluator:
             and self.expected_policy_version == configured[6]
             and self.expected_policy_digest == configured[7]
             and self.policy_version == configured[8]
-            and self.projection == configured[9]
-            and self.ssl_context is configured[10]
-            and self.allowed_hosts == configured[11]
-            and self.transport_security == configured[12]
-            and self._uses_standard_transport == configured[13]
+            and self.projection is configured[9]
+            and _is_reviewed_projection(self.projection)
+            and _projection_snapshot(self.projection) == configured[10]
+            and self.ssl_context is configured[11]
+            and _tls_context_security_snapshot(self.ssl_context) == configured[12]
+            and self.allowed_hosts == configured[13]
+            and self.transport_security == configured[14]
+            and self._uses_standard_transport == configured[15]
         )
 
     def _production_decoder_is_reviewed(self) -> bool:
@@ -1062,23 +1495,27 @@ def _cerbos_payload(
 def _cerbos_decision(
     payload: Mapping[str, Any], request: AuthorizationRequest | None = None
 ) -> bool | None:
-    direct = _find_allowed(payload)
-    if direct is not None:
-        return direct
+    # Cerbos CheckResources responses are a map of resource instances, not a
+    # generic authorization envelope. A production request must consume only
+    # the exact resource/action coordinate it asked Cerbos to decide. Scanning
+    # arbitrary instances, accepting a sole action, or falling back to a
+    # top-level boolean can turn an unrelated allow into this request's allow.
+    # Keep the generic fallback solely for the legacy direct-decoder call that
+    # has no request coordinate to bind.
+    if request is None:
+        return _find_allowed(payload)
     instances = payload.get("resourceInstances") or payload.get("resource_instances")
     if not isinstance(instances, Mapping):
         return None
-    for item in instances.values():
-        if not isinstance(item, Mapping):
-            continue
-        actions = item.get("actions")
-        if isinstance(actions, Mapping) and actions:
-            requested_action = request.operation if request is not None else ""
-            if requested_action and requested_action in actions:
-                return _find_allowed(actions[requested_action])
-            if len(actions) == 1:
-                return _find_allowed(next(iter(actions.values())))
-    return None
+    resource_id = request.resource.id if request.resource is not None else request.operation
+    item = instances.get(resource_id)
+    if not isinstance(item, Mapping):
+        return None
+    actions = item.get("actions")
+    if not isinstance(actions, Mapping):
+        return None
+    action = actions.get(request.operation)
+    return _find_allowed(action) if action is not None else None
 
 
 class CerbosEvaluator(JsonPdpEvaluator):
@@ -1136,6 +1573,36 @@ def _mapped_backend_operation(
     return mapped
 
 
+def _validate_static_operation_map(
+    mapper: OperationMapper | OperationMap | None,
+    *,
+    backend: str,
+    field: str,
+    pattern: re.Pattern[str],
+) -> None:
+    """Reject malformed declarative mappings while configuring an evaluator.
+
+    A callable mapper may depend on request data and remains validated at
+    authorization time. A frozen ``OperationMap`` has no reason to defer that
+    validation: a production readiness check must not report ready only to
+    deny the first live request for a spelling error in static configuration.
+    """
+
+    entries = _operation_map_entries(mapper)
+    if entries is None:
+        return
+    invalid = tuple(
+        operation
+        for operation, target in entries
+        if not pattern.fullmatch(target)
+    )
+    if invalid:
+        raise ValueError(
+            f"{backend} operation_map contains invalid {field} values for: "
+            + ", ".join(invalid)
+        )
+
+
 def _openfga_payload(
     request: AuthorizationRequest,
     *,
@@ -1174,6 +1641,12 @@ class OpenFgaEvaluator(JsonPdpEvaluator):
         if "encoder" in kwargs or "decoder" in kwargs:
             raise TypeError("OpenFgaEvaluator has fixed reviewed payload and decision adapters")
         self.operation_mapper = _coerce_operation_mapper(operation_mapper, operation_map)
+        _validate_static_operation_map(
+            self.operation_mapper,
+            backend="OpenFGA",
+            field="relation",
+            pattern=_OPENFGA_RELATION,
+        )
         selected = PdpRequestProjection.coerce(projection)
         super().__init__(
             endpoint,
@@ -1182,10 +1655,8 @@ class OpenFgaEvaluator(JsonPdpEvaluator):
             **kwargs,
         )
         self._production_operation_mapper = self.operation_mapper
-        self._production_operation_map_entries = (
-            self.operation_mapper.entries
-            if isinstance(self.operation_mapper, OperationMap)
-            else None
+        self._production_operation_map_entries = _operation_map_entries(
+            self.operation_mapper
         )
 
     def _encode_payload(self, request: AuthorizationRequest) -> Mapping[str, Any]:
@@ -1201,14 +1672,18 @@ class OpenFgaEvaluator(JsonPdpEvaluator):
         if self.operation_mapper is not self._production_operation_mapper:
             issues.append("backend.remote_configuration_mutated")
         elif (
-            isinstance(self._production_operation_mapper, OperationMap)
-            and self._production_operation_mapper.entries
+            _is_reviewed_operation_map(self._production_operation_mapper)
+            and _operation_map_entries(self._production_operation_mapper)
             != self._production_operation_map_entries
+        ):
+            issues.append("backend.remote_configuration_mutated")
+        elif type(self._production_operation_mapper) is _REVIEWED_OPERATION_MAP_TYPE and not _is_reviewed_operation_map(
+            self._production_operation_mapper
         ):
             issues.append("backend.remote_configuration_mutated")
         if self.operation_mapper is None:
             issues.append("backend.openfga_operation_mapper_required")
-        elif not isinstance(self._production_operation_mapper, OperationMap):
+        elif type(self._production_operation_mapper) is not _REVIEWED_OPERATION_MAP_TYPE:
             issues.append("backend.openfga_production_operation_map_required")
         return {"ready": not issues, "issues": tuple(issues)}
 
@@ -1257,6 +1732,12 @@ class SpiceDbEvaluator(JsonPdpEvaluator):
         if "encoder" in kwargs or "decoder" in kwargs:
             raise TypeError("SpiceDbEvaluator has fixed reviewed payload and decision adapters")
         self.operation_mapper = _coerce_operation_mapper(operation_mapper, operation_map)
+        _validate_static_operation_map(
+            self.operation_mapper,
+            backend="SpiceDB",
+            field="permission",
+            pattern=_SPICEDB_PERMISSION,
+        )
         selected = PdpRequestProjection.coerce(projection)
         super().__init__(
             endpoint,
@@ -1265,10 +1746,8 @@ class SpiceDbEvaluator(JsonPdpEvaluator):
             **kwargs,
         )
         self._production_operation_mapper = self.operation_mapper
-        self._production_operation_map_entries = (
-            self.operation_mapper.entries
-            if isinstance(self.operation_mapper, OperationMap)
-            else None
+        self._production_operation_map_entries = _operation_map_entries(
+            self.operation_mapper
         )
 
     def _encode_payload(self, request: AuthorizationRequest) -> Mapping[str, Any]:
@@ -1284,14 +1763,18 @@ class SpiceDbEvaluator(JsonPdpEvaluator):
         if self.operation_mapper is not self._production_operation_mapper:
             issues.append("backend.remote_configuration_mutated")
         elif (
-            isinstance(self._production_operation_mapper, OperationMap)
-            and self._production_operation_mapper.entries
+            _is_reviewed_operation_map(self._production_operation_mapper)
+            and _operation_map_entries(self._production_operation_mapper)
             != self._production_operation_map_entries
+        ):
+            issues.append("backend.remote_configuration_mutated")
+        elif type(self._production_operation_mapper) is _REVIEWED_OPERATION_MAP_TYPE and not _is_reviewed_operation_map(
+            self._production_operation_mapper
         ):
             issues.append("backend.remote_configuration_mutated")
         if self.operation_mapper is None:
             issues.append("backend.spicedb_operation_mapper_required")
-        elif not isinstance(self._production_operation_mapper, OperationMap):
+        elif type(self._production_operation_mapper) is not _REVIEWED_OPERATION_MAP_TYPE:
             issues.append("backend.spicedb_production_operation_map_required")
         return {"ready": not issues, "issues": tuple(issues)}
 
@@ -1345,9 +1828,11 @@ del _reviewed_remote_evaluator_type
 
 __all__ = [
     "AuthzenEvaluator",
+    "CasbinRequestTemplate",
     "CasbinEvaluator",
     "CerbosEvaluator",
     "JsonPdpEvaluator",
+    "OperationMap",
     "OperationMapper",
     "OpaEvaluator",
     "OpenFgaEvaluator",
