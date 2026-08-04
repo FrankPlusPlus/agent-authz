@@ -159,6 +159,9 @@ def test_release_workflow_uses_hash_locked_build_and_trusted_pypi_publish() -> N
     assert "contents: write" in release_job
     assert "id-token: write" in release_job
     assert "attestations: write" in release_job
+    assert "actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803" in release_job
+    assert "persist-credentials: false" in release_job
+    assert "fetch-depth: 0" in release_job
     assert "pip install" not in release_job
     assert "python -m build" not in release_job
     assert "fetch-depth: 0" in verify_job
