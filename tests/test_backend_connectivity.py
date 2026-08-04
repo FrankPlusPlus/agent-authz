@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import ssl
+import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from threading import Event, Thread
 
@@ -1270,6 +1271,25 @@ def test_standard_transport_does_not_follow_redirects_or_forward_credentials():
         receiver_thread.join(timeout=2)
 
     assert receiver_headers == []
+
+
+def test_standard_transport_does_not_inherit_ambient_proxy_configuration(
+    monkeypatch: pytest.MonkeyPatch,
+    pdp_server,
+) -> None:
+    """A host proxy must not become an undeclared PDP data recipient."""
+
+    endpoint, received = pdp_server
+    monkeypatch.setattr(
+        urllib.request,
+        "getproxies",
+        lambda: {"http": "http://127.0.0.1:1", "https": "http://127.0.0.1:1"},
+    )
+
+    response = _urllib_transport(f"{endpoint}/opa", {"request": "value"}, {}, 1.0)
+
+    assert response["result"]["allow"] is True
+    assert received[-1][0] == "/opa"
 
 
 class _PdpHandler(BaseHTTPRequestHandler):

@@ -1,113 +1,104 @@
-# Agent Authz（中文）
+<h1 align="center">Agent Authz</h1>
 
-> **公开 Beta — GitHub Release · Python 3.11+ · Apache-2.0**
+<p align="center">
+  <strong>让 Agent 的每一种执行方式，都经过同一次授权决策。</strong><br>
+  业务操作只定义一次，在已登记的执行边界统一检查。
+</p>
 
-## 同一个业务操作，在真正执行的位置做一次授权检查
+<p align="center">
+  <a href="https://github.com/FrankPlusPlus/agent-authz/actions/workflows/ci.yml"><img src="https://github.com/FrankPlusPlus/agent-authz/actions/workflows/ci.yml/badge.svg?branch=main" alt="CI 状态"></a>
+  <img src="https://img.shields.io/badge/status-public%20beta-f59e0b" alt="公开 Beta">
+  <img src="https://img.shields.io/badge/python-3.11%2B-3776AB?logo=python&logoColor=white" alt="Python 3.11 或更高版本">
+  <img src="https://img.shields.io/badge/license-Apache--2.0-2f80ed" alt="Apache 2.0 许可证">
+</p>
 
-在 FastAPI 路由、Python Agent Tool、MCP v2 Tool、检索边界或后台任务执行前，
-为同一个 SaaS 业务操作做最终允许/拒绝判断。
+<p align="center">
+  <a href="#30-秒看到结果">30 秒看到结果</a> ·
+  <a href="../quickstart.md">快速开始</a> ·
+  <a href="../architecture.md">架构</a> ·
+  <a href="../frameworks.md">集成</a> ·
+  <a href="../production.md">生产边界</a> ·
+  <a href="../../README.md">English</a>
+</p>
 
-Agent Authz 是嵌入式 Python 授权 PEP。你的服务提供已经验证的身份，以及来自
-可信数据源的租户和资源事实；Authz 将已登记的入口映射为一个业务操作，并在执行
-边界进行授权判断。可以使用内置决策器，也可以保留已有策略后端。
+<p align="center">
+  <img src="../../assets/agent-authz-hero.svg" alt="API、Agent Tool、MCP Tool、任务和检索路径汇聚到同一个业务操作，再得到允许或拒绝决策" width="920">
+</p>
 
-它**不是** PDP、关系数据库、身份系统、向量数据库、Agent 框架或托管控制平面。
-只有显式登记并实际路由经过 Authz 的路径才会受到保护；它不会自动发现漏接的路径。
+Agent Authz 是一个 Python 授权层，负责 Agent 动作真正执行前的最后一道检查。
+它把已登记的执行路径映射为业务操作，从宿主应用拥有的数据源加载租户和关系事实，
+并在返回受保护数据或产生副作用前给出明确的允许/拒绝结果。
 
-**适合使用它的场景：**同一个业务操作跨 API、Agent Tool、MCP、RAG 或任务边界，
-且需要对同一条可信资源做一致的最终决策。**应与专用 PDP 或关系数据库搭配使用的场景：**
-需要策略分发、tuple 写入、全局一致性或托管控制平面。
+它可以使用内置决策器，也可以接入已有策略后端。认证、业务数据、事务和策略控制平面
+仍由你的应用负责。
 
-~~~
-已验证身份  →  业务操作  →  可信资源  →  决策
-~~~
+它适合正在构建多租户 Agent 的 Python 团队：业务动作可能从 API、Tool、MCP 服务、检索或
+后台任务进入系统。它只保护应用显式登记并路由到 guard 的路径，不会自动发现漏接的路径。
 
-## 安装并验证
+## 问题：一个操作，多个执行路径
 
-在明确启用 PyPI 发布前，请使用经过校验的 GitHub Release wheel，不要依赖
-未验证的包名。下载 wheel 时一并下载校验和：
+`document.publish` 不只是一个 HTTP 接口。它也可能从 Agent Tool、MCP 服务、后台任务
+或检索工作流进入系统。如果每个入口各写一套检查，权限就会漂移：
 
-~~~bash
-gh release download v0.7.0b3 --repo FrankPlusPlus/agent-authz \
-  --pattern 'agent_authz_sdk-0.7.0b3-py3-none-any.whl' --pattern WHEEL-SHA256SUMS
-shasum -a 256 -c WHEEL-SHA256SUMS
-gh attestation verify agent_authz_sdk-0.7.0b3-py3-none-any.whl \
-  -R FrankPlusPlus/agent-authz
-python -m pip install --no-deps agent_authz_sdk-0.7.0b3-py3-none-any.whl
-~~~
+- API 有保护，但同一个 Tool 可以被直接调用；
+- Tool 在发现阶段隐藏了，按名字直接调用时仍然执行；
+- 检索请求被允许，却返回了另一个租户的数据；
+- 后台任务悄悄使用了更宽的身份。
 
-若希望透明地审查源码并运行完整证明，可使用该 release tag 做开发和源码审查。Git tag
-不是按内容寻址的发布证明；部署发布物时仍应先验证上面的 release wheel：
+Agent Authz 把这些路径收敛为一个简单契约：
 
-~~~bash
-git clone --branch v0.7.0b3 https://github.com/FrankPlusPlus/agent-authz.git
+```text
+已登记路径 → 业务操作 → 可信资源 → 允许 / 拒绝
+```
+
+## 30 秒看到结果
+
+这个无额外依赖的示例会模拟 API、Python Tool、租户检查、检索过滤、审计事件和一次性
+执行 Permit：
+
+```bash
+git clone --branch v0.7.0b6 https://github.com/FrankPlusPlus/agent-authz.git
 cd agent-authz
 python -m venv .venv
 . .venv/bin/activate
-python -m pip install -e '.[dev]'
+python -m pip install -e .
 python examples/secure_document_agent.py
-~~~
+```
 
-这个无依赖示例会断言：
+输出是可以直接检查的安全结果：
 
-- API 与 Tool 对同一条已授权业务操作允许访问；
-- 直接调用未授权 Tool 会被拒绝；
-- 跨租户请求会被拒绝；
-- 未授权检索候选不会进入 prompt；
-- 最终执行 Permit 只能被消费一次。
+```text
+api_allowed=True          tool_allowed=True
+tool_denied=True          cross_tenant_denied=True
+permitted_chunk_ids=['chunk-public']
+excluded_candidate_count=1  permit_status='consumed'
+coverage_ready=True
+```
 
-若在开发或源码审查中以审查过的 tag 作为源码依赖安装（不作为发布完整性证明）：
+完整示例见 [examples/secure_document_agent.py](../../examples/secure_document_agent.py)。
 
-~~~bash
-python -m pip install "agent-authz-sdk @ git+https://github.com/FrankPlusPlus/agent-authz.git@v0.7.0b3"
-~~~
+## 提供什么
 
-**从这里开始：** [保护 MCP Tool](../mcp.md) ·
-[接入 FastAPI 路由](../frameworks.md#fastapi) ·
-[支持范围](#支持范围) · [Beta 边界](#beta-边界) ·
-[English](../../README.md)
+| 原语 | 对开发者的结果 |
+| --- | --- |
+| **统一业务操作** | 把 API、Agent Tool、MCP Tool、任务和检索边界映射到同一个业务动作。 |
+| **可信资源加载** | 租户、owner 和关系事实来自你的 loader，不来自模型输出或 Tool 参数。 |
+| **最终执行 guard** | 被拒绝的 Tool 或路由不会进入受保护 callable。 |
+| **CoverageManifest** | 让已声明的最终 guard 和数据边界可以在 CI 中检查。 |
+| **CandidateFilter** | 在候选内容进入 prompt 前移除未授权检索结果。 |
+| **决策与审计原语** | 保留 reason、obligation、策略版本和隐私安全的事件信息。 |
+| **ExecutionPermit** | 将高风险动作绑定到短时、一次性的执行许可。 |
 
-## 它解决什么问题
+## 五分钟接入
 
-同一个 "document.publish" 可能同时从 HTTP 接口、Agent Tool、MCP 服务、后台任务
-和检索工作流进入系统。框架 hook 能方便地为某一个入口加检查，但无法天然保证所有
-入口都对同一条可信资源问同一个业务问题。
-这里的 **entrypoint（执行入口）** 就是这些实际执行面：路由、callable Tool、MCP Tool、
-检索边界或后台任务。
+先登记资源和策略，再让宿主应用的 loader 提供决策所需的事实：
 
-~~~
-POST /documents/{id}/publish ─┐
-tool: publish_document         ├─ document.publish ─ 可信文档 ─ 决策
-mcp: publish_document          │
-task: publish_scheduled        ┘
-~~~
-
-Agent Authz 用下面的契约解决这种权限漂移：
-
-- Catalog 将一个业务操作映射到已登记的入口。
-- ResourceRegistry 从业务数据源加载租户、成员关系、owner/viewer 等事实，不信任
-  请求 JSON、模型输出或 Tool 参数里的关系字段。
-- API、Python callable Tool、MCP、RAG、任务共用同一份
-  AgentRequest → Decision 合同。
-- CoverageManifest 可在 CI 中检查**已声明**的最终 guard 和数据边界；它是治理清单，
-  不是自动扫描所有旁路的安全证明。
-- Permit、审计事件、候选过滤为高风险边界提供明确原语，但不假装是分布式控制平面。
-
-## 推荐的五分钟安全接入
-
-请求只提供资源坐标；你的 loader 负责资源的租户和关系事实。这是生产服务应该先走的
-路径。
-
-~~~python
+```python
 from authz_sdk import Authz, Catalog, PolicySet, ResourceRegistry, Subject
 
 catalog = Catalog()
-catalog.resource(
-    "document",
-    actions=("read",),
-    relations=("viewer",),
-    tenant_required=True,
-)
+catalog.resource("document", actions=("read",), relations=("viewer",), tenant_required=True)
+
 policies = PolicySet()
 policies.bind(
     id="document_viewers_read",
@@ -116,37 +107,39 @@ policies.bind(
     relations=("viewer",),
 )
 
-rows = {
+resources = ResourceRegistry()
+
+documents = {
     "doc-1": {
         "tenant_id": "acme",
         "viewers": {"alice"},
-        "body": "季度计划",
+        "body": "A private launch plan",
     }
 }
-resources = ResourceRegistry()
-resources.register(
-    "document",
-    lambda document_id, subject, _context: (
-        {
-            "id": document_id,
-            "attributes": {"tenant_id": rows[document_id]["tenant_id"]},
-            "relations": {"viewer": subject.id in rows[document_id]["viewers"]},
-        }
-        if document_id in rows
-        else None
-    ),
-)
+
+def load_document(document_id, subject, context):
+    row = documents.get(document_id)
+    if row is None or row["tenant_id"] != subject.tenant_id:
+        return None
+    return {
+        "id": document_id,
+        "attributes": {"tenant_id": row["tenant_id"]},
+        "relations": {"viewer": subject.id in row["viewers"]},
+    }
+
+resources.register("document", load_document)
 
 authz = Authz.production(catalog, policies, resources)
-assert authz.can(
+decision = authz.can(
     Subject(id="alice", tenant_id="acme"),
     operation="document.read",
     resource_type="document",
     resource_id="doc-1",
-).allowed
-~~~
+)
+assert decision.allowed
+```
 
-然后把同一个业务操作挂到最终执行 guard：
+然后把同一个业务操作挂到最终 callable：
 
 ~~~python
 from authz_sdk import AgentRuntime, protect_tool
@@ -161,68 +154,87 @@ runtime = AgentRuntime(authz)
     resource_id=lambda call: call.kwargs["document_id"],
 )
 def read_document(*, subject, document_id):
-    return rows[document_id]["body"]
+    return documents[document_id]["body"]
 ~~~
 
-## 支持范围
+## 适配现有技术栈
 
-| 能力面 | 状态 | 你可以依赖什么 | 明确边界 |
-| --- | --- | --- | --- |
-| Native core + Authz.production | 可用 | 进程内决策、严格 Catalog、可信资源和租户检查 | 宿主负责认证和数据查询正确性 |
-| FastAPI | 可用，可选依赖 | 路由处理器执行前的 dependency guard | 宿主提供验证后的请求身份 |
-| MCP Python SDK v2 | Beta，可选依赖 | 已登记 Tool callable 执行前的最终 guard | 不包含 MCP OAuth、同意、限流或动态 tools/list 过滤 |
-| Agno / LangGraph | 基础 callable wrapper | Tool/node 执行前的 guard | 不是原生框架插件；未覆盖 checkpoint、handoff、streaming |
-| Casbin | 可用，可选依赖 | 在统一 contract 后复用已有 enforcer；生产环境支持默认或静态请求模板 | Casbin 继续拥有模型和策略存储 |
-| OPA / Cerbos | 实验性 starter transport | 远程决策的 PoC | 不是官方/完整 client；没有异步连接池、重试或控制平面 |
-| OpenFGA / SpiceDB | 实验性；生产环境必须静态显式映射 | 远程 relation/permission 检查的 PoC | 宿主把业务操作映射为合法 relation/permission，并负责模型/版本语义 |
-| RAG CandidateFilter | 可用原语 | 候选进入 prompt 前过滤 | 不会自动做 SQL/向量 pushdown，也无法证明每个检索路径都已接入 |
-| Pack 与后台任务 | 手动 contract | 宿主可映射并检查相同业务操作 | SDK 不负责执行、发现或自动覆盖 |
-| 托管 PDP / 关系图 / 控制平面 | 未提供 | — | 使用外部系统 |
+| 表面 | 状态 | 保护内容 |
+| --- | --- | --- |
+| Native core + `Authz.production()` | 可用 | Catalog、租户、可信资源、策略和最终决策契约 |
+| FastAPI | 可用扩展 | handler 执行前的路由依赖 guard |
+| Python Agent Tool | 可用 | 同步/异步 callable 执行前的 guard |
+| MCP Python SDK 2.x | Beta 扩展 | 已登记 MCP Tool callable 执行前的 guard；认证仍由宿主负责 |
+| Agno / LangGraph | 基础 wrapper | Tool 和 node 执行 guard |
+| Casbin | 可用扩展 | 在统一请求/决策契约后复用已有 enforcer |
+| OPA / Cerbos / OpenFGA / SpiceDB | 实验性 transport | fail-closed starter adapter，不是完整官方 client |
+| RAG | 可用原语 | prompt 组装前的候选过滤 |
 
-~~~mermaid
-flowchart LR
-    I["已验证身份<br/>(宿主认证)"] --> G["Agent Authz guard<br/>入口 → 业务操作"]
-    E["FastAPI 路由 · Agent Tool · MCP Tool"] --> G
-    G --> R["ResourceRegistry<br/>(宿主数据：租户 + 关系)"]
-    R --> P["Native policy<br/>或已有 PDP"]
-    P -->|允许| S["业务 API 或 Tool 副作用"]
-    P -->|拒绝| D["403 或 Tool 错误"]
-~~~
+详见[完整支持矩阵](../frameworks.md)和[后端边界](../backends.md)。
 
-## Beta 边界
+## 为什么不直接只用策略引擎？
 
-Authz 在自己作出决策时采用 fail-closed；但宿主应用仍必须：
+继续使用你信任的策略引擎。Agent Authz 负责策略引擎不会自动盘点的应用执行契约：
 
-- 验证调用者身份，并传入请求级 Subject；绝不能从 Tool 参数或不可信 header 推导身份。
-- 通过 ResourceRegistry 从可信存储加载 owner、成员关系和租户事实。
-- 将最终 guard 放在副作用前，并在业务需要时在事务内复查资源版本/状态。
-- 让所有相关 API、Tool、MCP、检索和任务路径经过 guard；未登记路径不在 SDK 的视野内。
-- 根据实际风险配置持久审计、共享原子 PermitStore、查询 pushdown、密钥管理和故障策略。
+```text
+API · Tool · MCP · 任务 · 检索
+              ↓
+       document.publish
+              ↓
+        一次可信资源决策
+              ↓
+          业务副作用
+```
 
-安全敏感场景请先阅读[威胁模型](../threat-model.md)、
-[生产指南](../production.md)和[安全策略](../../SECURITY.md)。
+它不替代 Casbin、OPA、Cerbos、OpenFGA 或 SpiceDB，而是负责让同一个业务操作在不同
+Agent 执行面之间保持一致。
 
-## 更多文档
+## 边界要说清楚
 
-- [Quickstart](../quickstart.md) — Catalog、策略绑定与可信 loader
-- [架构](../architecture.md) — 执行合同与信任边界
-- [Agent Runtime](../agent-runtime.md) — discover、mount、execute 与 Permit
-- [框架集成](../frameworks.md) — FastAPI、LangGraph、Agno 风格 guard
-- [MCP v2](../mcp.md) — 已验证身份和 Tool 集成
-- [后端适配](../backends.md) — Remote PDP 边界与 operation mapping
-- [Coverage Manifest](../coverage.md) — 已声明入口的 CI 证据
-- [迁移指南](../migration.md) — 不重写全系统的渐进接入
-- [对比与定位](../comparison.md)
+Authz 自己作出决策时可以 fail-closed，但宿主应用仍必须：
+
+- 验证调用者身份，并提供请求级、可信的 `Subject`；
+- 从可信数据源加载租户、owner 和关系事实；
+- 把最终 guard 放在副作用之前；
+- 让所有相关路径经过已登记的 guard；
+- 在需要时提供持久审计、query pushdown、Permit 密钥管理和故障策略；多 worker 的
+  Permit 可使用 SDK 提供的 `RedisPermitStore`，最终业务事务校验仍由宿主负责。
+
+这个 SDK 不是身份系统、关系数据库、向量数据库、Agent 框架、托管控制平面或同进程
+插件沙箱。安全敏感场景请先阅读[威胁模型](../threat-model.md)和[生产指南](../production.md)。
+
+<details>
+<summary>发布物验证</summary>
+
+GitHub Release 可用后，部署 wheel 前应验证校验和与 attestation：
+
+```bash
+gh release download v0.7.0b6 --repo FrankPlusPlus/agent-authz \
+  --pattern 'agent_authz_sdk-0.7.0b6-py3-none-any.whl' --pattern WHEEL-SHA256SUMS
+shasum -a 256 -c WHEEL-SHA256SUMS
+gh attestation verify agent_authz_sdk-0.7.0b6-py3-none-any.whl \
+  -R FrankPlusPlus/agent-authz
+python -m pip install --no-deps agent_authz_sdk-0.7.0b6-py3-none-any.whl
+```
+
+</details>
+
+## 文档与贡献
+
+- [Quickstart](../quickstart.md)
+- [架构](../architecture.md)
+- [Agent Runtime](../agent-runtime.md)
+- [MCP 集成](../mcp.md)
+- [Coverage 证据](../coverage.md)
+- [快速开始](../quickstart.md)：先用一个文档读取场景理解 Subject、Operation、Resource 和最终 guard
+- [迁移指南](../migration.md)
+- [与成熟授权系统的对比](../comparison.md)
+- [路线图](../../ROADMAP.md)
+- [安全策略](../../SECURITY.md)
+- [供应链策略](../../SUPPLY_CHAIN.md)
 - [English README](../../README.md)
 
-## 路线图与贡献
-
-下一阶段不是再发明一种策略语言，而是让安全路径更省心：框架 inventory、可观测的
-remote PDP contract、持久 reference store、query-pushdown interface，以及真实后端
-conformance suite。见 [ROADMAP.md](../../ROADMAP.md)。
-
-提交 PR 或使用发布物前，请阅读 [CONTRIBUTING.md](../../CONTRIBUTING.md)、
-[SECURITY.md](../../SECURITY.md) 和 [SUPPLY_CHAIN.md](../../SUPPLY_CHAIN.md)。
+提交 PR 前请阅读 [CONTRIBUTING.md](../../CONTRIBUTING.md)。
 
 ## 协议
 

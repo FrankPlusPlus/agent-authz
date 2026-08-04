@@ -62,6 +62,22 @@ after a regression window and audit review.
 
 ## Compatibility rule
 
+### v0.7 core API stability
+
+The following public contract is frozen for the v0.7 Beta line:
+
+- `Subject`, `Resource`, `AuthorizationRequest`, and `Decision`;
+- `Authz` / `Authz.production()` and the `subject → operation → resource`
+  request shape;
+- `AgentRequest`, `AgentRuntime`, and `protect_tool()`;
+- the host-facing evaluator and resource-registry contracts.
+
+New framework adapters, coverage evidence, audit exporters, and optional
+stores may be added without changing those call sites. A future breaking
+change requires a new major version, an explicit migration guide, and a
+supported deprecation period; a Beta adapter may still tighten an unsafe
+assembly-time default when its documentation already required the safe form.
+
 The SDK cannot automatically infer a business relation that the old code never
 exposed. For example, “only the creator can delete” requires a trusted creator
 fact. A CRUD menu entry alone cannot express that rule. The migration must

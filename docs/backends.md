@@ -54,7 +54,7 @@ checks are not assembled manually.
 Install the optional dependency:
 
 ```bash
-python -m pip install "agent-authz-sdk[casbin] @ git+https://github.com/FrankPlusPlus/agent-authz.git@v0.7.0b3"
+python -m pip install "agent-authz-sdk[casbin] @ git+https://github.com/FrankPlusPlus/agent-authz.git@v0.7.0b6"
 ```
 
 Create a normal Casbin enforcer and put it behind the same Authz facade:
@@ -107,6 +107,13 @@ sub = subject.id or subject.email
 obj = resource.uri (a canonical percent-encoded type:id coordinate)
 act = Authz operation, for example ai_employee.delete
 ```
+
+For a complete HTTP reference that keeps the same Casbin enforcer while
+verifying the actual FastAPI guard attachment, see
+[`fastapi_casbin_coverage.py`](../examples/fastapi_casbin_coverage.py). It is
+the intended division of responsibility: Casbin decides policy; Agent Authz
+owns the execution-boundary mapping, trusted resource loading, and coverage
+evidence.
 
 For ordinary identifiers this remains the familiar `document:doc-1`. A colon,
 percent sign, or reserved URI character in either component is encoded
@@ -207,6 +214,9 @@ All remote adapters have the following baseline guarantees:
   and hostname; an unverified context is rejected at construction time;
 - the standard transport rejects all HTTP redirects before a second origin can
   receive an `Authorization` header;
+- the standard transport does not inherit ambient HTTP(S) proxy settings;
+  deploy an approved PDP/gateway endpoint instead of relying on workstation
+  proxy state;
 - the public result is always an Authz `Decision`;
 - the original operation, trusted resource, entrypoint, request/trace IDs,
   contract version, catalog fingerprint, and policy version are preserved;

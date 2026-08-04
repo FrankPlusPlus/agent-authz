@@ -152,6 +152,41 @@ def _compare(operator: str, left: Any, right: Any) -> bool:
     return False
 
 
+def _subject_values(subject: Subject, reference: str) -> tuple[Any, ...] | None:
+    """Return all values for the legacy singular role/position aliases.
+
+    The public policy vocabulary historically used ``subject.role`` and
+    ``subject.position``.  Subject now supports multiple roles and positions,
+    so those aliases must mean "any assigned value" rather than the first
+    value in an arbitrary identity-provider order.
+    """
+
+    normalized = str(reference or "").strip()
+    if normalized == "subject.role":
+        return tuple(subject.roles) or (_MISSING,)
+    if normalized == "subject.position":
+        return tuple(subject.positions) or (_MISSING,)
+    return None
+
+
+def _compare_subject_attribute(
+    operator: str,
+    values: tuple[Any, ...],
+    right: Any,
+) -> bool:
+    """Apply scalar comparison semantics to every role/position value."""
+
+    if operator in {"eq", "in", "contains", "contains_any"}:
+        return any(_compare(operator, value, right) for value in values)
+    if operator == "neq":
+        return all(not _compare("eq", value, right) for value in values)
+    if operator == "not_in":
+        return all(_compare("not_in", value, right) for value in values)
+    if operator in {"exists", "truthy"}:
+        return _compare(operator, values, right)
+    return any(_compare(operator, value, right) for value in values)
+
+
 def _simple_condition(
     condition: Mapping[str, Any],
     *,
@@ -167,8 +202,13 @@ def _simple_condition(
     # a dashboard: {"left": "subject.tenant_id", "operator": "eq", ...}.
     operator = str(condition.get("operator") or "").strip().lower()
     if operator:
-        left = resolve_value(condition.get("left"), subject=subject, resource=resource, context=context)
+        left_ref = condition.get("left")
+        reference = str(left_ref or "")
+        left = resolve_value(left_ref, subject=subject, resource=resource, context=context)
         right = resolve_value(condition.get("right"), subject=subject, resource=resource, context=context)
+        values = _subject_values(subject, reference)
+        if values is not None:
+            return _compare_subject_attribute(operator, values, right)
         return _compare(operator, left, right)
 
     # The short form is convenient in hand-written policies:

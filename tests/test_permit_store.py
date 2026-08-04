@@ -1,11 +1,58 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
-from threading import Barrier
+from threading import Barrier, Lock
 
 from authz_sdk.permit import ExecutionPermit
 from authz_sdk.models import Decision, Subject
-from authz_sdk.permit_store import InMemoryPermitStore, PermitStoreStatus
+from authz_sdk.permit_store import (
+    InMemoryPermitStore,
+    PermitStoreStatus,
+    RedisPermitStore,
+    permit_store_readiness,
+)
+
+
+class _FakeRedis:
+    """Small atomic Redis-script test double; no Redis server is required."""
+
+    def __init__(self) -> None:
+        self._values: set[str] = set()
+        self._lock = Lock()
+        self.calls: list[tuple[object, ...]] = []
+        self.failure: Exception | None = None
+        self.ping_result = True
+
+    def eval(self, script: str, key_count: int, *args: object) -> int:
+        if self.failure is not None:
+            raise self.failure
+        self.calls.append((script, key_count, *args))
+        with self._lock:
+            if "agent-authz-permit:consume" in script:
+                revoked_key, consumed_key, _ttl = args
+                if str(revoked_key) in self._values:
+                    return 2
+                if str(consumed_key) in self._values:
+                    return 3
+                self._values.add(str(consumed_key))
+                return 1
+            if "agent-authz-permit:revoke" in script:
+                revoked_key, _ttl = args
+                already_revoked = str(revoked_key) in self._values
+                self._values.add(str(revoked_key))
+                return int(already_revoked)
+        raise AssertionError("unexpected Redis script")
+
+    def exists(self, key: str) -> int:
+        if self.failure is not None:
+            raise self.failure
+        with self._lock:
+            return int(key in self._values)
+
+    def ping(self) -> bool:
+        if self.failure is not None:
+            raise self.failure
+        return self.ping_result
 
 
 def _permit(*, nonce: str = "permit-nonce", expires_at: float = 200.0) -> ExecutionPermit:
@@ -132,3 +179,88 @@ def test_permit_preserves_case_sensitive_subject_ids() -> None:
         operation="document.publish",
         now=101.0,
     )
+
+
+def test_redis_store_consumes_one_nonce_once_across_independent_store_instances() -> None:
+    client = _FakeRedis()
+    first = RedisPermitStore(client, prefix="test-permit")
+    second = RedisPermitStore(client, prefix="test-permit")
+    permit = _permit()
+    workers = 16
+    start = Barrier(workers)
+
+    def consume_once(index: int) -> PermitStoreStatus:
+        start.wait()
+        store = first if index % 2 else second
+        return store.consume(permit, now=100.0).status
+
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        statuses = list(executor.map(consume_once, range(workers)))
+
+    assert statuses.count(PermitStoreStatus.CONSUMED) == 1
+    assert statuses.count(PermitStoreStatus.REPLAYED) == workers - 1
+    consumed_key = first._key("consumed", permit.nonce)
+    assert permit.nonce not in consumed_key
+    assert consumed_key.startswith("test-permit:{")
+    assert consumed_key.endswith("}:consumed")
+    revoked_key = first._key("revoked", permit.nonce)
+    assert consumed_key.split("{", 1)[1].split("}", 1)[0] == revoked_key.split("{", 1)[1].split("}", 1)[0]
+
+
+def test_redis_store_revocation_and_expiry_follow_the_permit_store_contract() -> None:
+    client = _FakeRedis()
+    store = RedisPermitStore(client)
+    permit = _permit()
+
+    assert store.is_revoked(permit, now=100.0).status is PermitStoreStatus.NOT_REVOKED
+    assert store.revoke(permit, now=100.0).status is PermitStoreStatus.REVOKED
+    assert store.revoke(permit, now=100.0).detail == "permit nonce was already revoked"
+    assert store.consume(permit, now=100.0).status is PermitStoreStatus.REVOKED
+    assert store.cleanup_expired(now=100.0).removed == 0
+    assert store.consume(_permit(expires_at=100.0), now=100.0).status is PermitStoreStatus.EXPIRED
+
+
+def test_redis_store_fails_closed_when_the_shared_backend_is_unavailable() -> None:
+    client = _FakeRedis()
+    store = RedisPermitStore(client)
+    client.failure = ConnectionError("redis unavailable")
+
+    result = store.consume(_permit(), now=100.0)
+
+    assert result.status is PermitStoreStatus.UNAVAILABLE
+    assert "ConnectionError" in result.detail
+
+
+def test_permit_store_readiness_rejects_process_local_store_for_multi_worker_use() -> None:
+    local = permit_store_readiness(InMemoryPermitStore(), require_shared=True)
+    client = _FakeRedis()
+    shared = permit_store_readiness(RedisPermitStore(client), require_shared=True)
+    client.ping_result = False
+    unhealthy = permit_store_readiness(RedisPermitStore(client), require_shared=True)
+
+    assert not local["ready"]
+    assert "permit_store.shared_required" in local["issues"]
+    assert shared == {
+        "ready": True,
+        "shared": True,
+        "durability": "shared",
+        "issues": (),
+    }
+    assert not unhealthy["ready"]
+    assert "permit_store.ping_failed" in unhealthy["issues"]
+
+
+def test_redis_store_validates_client_and_prefix_without_importing_redis() -> None:
+    try:
+        RedisPermitStore(object())
+    except TypeError as error:
+        assert "eval" in str(error)
+    else:  # pragma: no cover - protects the public constructor contract
+        raise AssertionError("invalid Redis client was accepted")
+
+    try:
+        RedisPermitStore(_FakeRedis(), prefix="::")
+    except ValueError as error:
+        assert "prefix" in str(error)
+    else:  # pragma: no cover - protects the public constructor contract
+        raise AssertionError("empty Redis prefix was accepted")

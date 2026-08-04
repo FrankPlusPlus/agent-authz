@@ -17,6 +17,8 @@ from typing import Any, Iterable, Mapping
 from authz_sdk.catalog import Catalog
 
 
+_FRAMEWORK_OBSERVATION_TOKEN = object()
+
 @dataclass(frozen=True)
 class CoverageIssue:
     """One deterministic coverage gap suitable for CI output."""
@@ -41,9 +43,11 @@ class CoverageReport:
 
     required_operations: tuple[str, ...]
     enforced_entrypoints: tuple[dict[str, Any], ...]
+    discovered_entrypoints: tuple[dict[str, str], ...]
     data_boundaries: tuple[dict[str, str], ...]
     exemptions: Mapping[str, str]
     issues: tuple[CoverageIssue, ...]
+    verification_level: str = "strict"
 
     @property
     def ready(self) -> bool:
@@ -54,9 +58,11 @@ class CoverageReport:
             "ready": self.ready,
             "required_operations": list(self.required_operations),
             "enforced_entrypoints": [dict(item) for item in self.enforced_entrypoints],
+            "discovered_entrypoints": [dict(item) for item in self.discovered_entrypoints],
             "data_boundaries": [dict(item) for item in self.data_boundaries],
             "exemptions": dict(self.exemptions),
             "issues": [item.to_dict() for item in self.issues],
+            "verification_level": self.verification_level,
         }
 
 
@@ -78,6 +84,7 @@ class _EnforcementEvidence:
     operation: str
     final: bool
     evidence: str
+    verified: bool
 
     @property
     def entrypoint(self) -> str:
@@ -91,6 +98,7 @@ class _EnforcementEvidence:
             "operation": self.operation,
             "final": self.final,
             "evidence": self.evidence,
+            "verified": self.verified,
         }
 
 
@@ -102,11 +110,12 @@ class CoverageManifest:
     that are intentionally not deployed by one service; use :meth:`exempt`
     with a reason rather than silently shrinking the catalog.
 
-    Framework adapters can call :meth:`record_enforcement` while they install
-    a route/tool guard. Applications may call it directly for task queues,
-    custom MCP servers, or other runtime surfaces. ``evidence`` is a stable
-    test name, route identifier, or deployment reference for humans; it is not
-    a cryptographic proof that arbitrary host code cannot bypass the guard.
+    ``record_enforcement`` is an attestation by default. Strict completion
+    requires an adapter to observe framework-owned assembly evidence; use
+    :meth:`assert_attested_complete` only where a generic framework exposes no
+    inspectable registry. ``evidence`` is a stable test name, route identifier,
+    or deployment reference for humans; it is not a cryptographic proof that
+    arbitrary host code cannot bypass the guard.
     """
 
     def __init__(
@@ -131,6 +140,8 @@ class CoverageManifest:
         self._lock = RLock()
         self._exemptions: dict[str, str] = {}
         self._enforced: dict[tuple[str, str], _EnforcementEvidence] = {}
+        self._discovered: dict[str, dict[str, str]] = {}
+        self._framework_observed_kinds: set[str] = set()
         self._data_boundaries: dict[str, tuple[str, str]] = {}
         self._final_operations: set[str] = set()
         self._recording_issues: list[CoverageIssue] = []
@@ -180,8 +191,72 @@ class CoverageManifest:
         Calling this does not execute a policy decision; invoke
         :meth:`assert_complete` after the application has registered routes,
         tools, and tasks. Mismatched/unknown bindings become reportable gaps
-        rather than being silently accepted as evidence.
+        rather than being silently accepted as evidence. This public method is
+        intentionally an application attestation. Framework adapters use the
+        private assembly-observation path below instead.
         """
+
+        return self._record_enforcement(
+            kind,
+            name,
+            operation=operation,
+            final=final,
+            evidence=evidence,
+            verified=False,
+        )
+
+    def _record_framework_enforcement(
+        self,
+        kind: str,
+        name: str,
+        *,
+        operation: str = "",
+        final: bool = True,
+        evidence: str = "",
+        _token: object,
+    ) -> "CoverageManifest":
+        """Record adapter-private, framework-observed enforcement evidence."""
+
+        if _token is not _FRAMEWORK_OBSERVATION_TOKEN:
+            raise PermissionError("framework evidence may only be recorded by an SDK adapter")
+
+        return self._record_enforcement(
+            kind,
+            name,
+            operation=operation,
+            final=final,
+            evidence=evidence,
+            verified=True,
+        )
+
+    def _record_framework_inventory(
+        self,
+        kind: str,
+        names: Iterable[str],
+        *,
+        source: str,
+        _token: object,
+    ) -> "CoverageManifest":
+        """Record inventory observed by an SDK framework adapter."""
+
+        if _token is not _FRAMEWORK_OBSERVATION_TOKEN:
+            raise PermissionError("framework inventory may only be recorded by an SDK adapter")
+        self.record_inventory(kind, names, source=source)
+        with self._lock:
+            self._framework_observed_kinds.add(str(kind or "").strip())
+        return self
+
+    def _record_enforcement(
+        self,
+        kind: str,
+        name: str,
+        *,
+        operation: str,
+        final: bool,
+        evidence: str,
+        verified: bool,
+    ) -> "CoverageManifest":
+        """Store enforcement evidence with provenance fixed by the caller."""
 
         normalized_kind = str(kind or "").strip()
         normalized_name = str(name or "").strip()
@@ -217,6 +292,7 @@ class CoverageManifest:
                 operation=binding.operation,
                 final=bool(final),
                 evidence=str(evidence or "").strip(),
+                verified=bool(verified),
             )
         return self
 
@@ -239,8 +315,48 @@ class CoverageManifest:
             )
         return self
 
-    def report(self) -> CoverageReport:
-        """Return all gaps without mutating the application configuration."""
+    def record_inventory(
+        self,
+        kind: str,
+        names: Iterable[str],
+        *,
+        source: str = "",
+    ) -> "CoverageManifest":
+        """Record an application-discovered execution-boundary inventory.
+
+        Inventory is intentionally narrower than source-code scanning: a
+        framework adapter reports the routes or tools it actually registered,
+        then the manifest compares that snapshot with catalog bindings of the
+        same ``kind``. This catches both a live route with no operation mapping
+        and a stale catalog mapping that no longer exists in the application.
+
+        Calling this again for the same kind replaces the prior snapshot. That
+        makes startup checks and test fixtures deterministic rather than
+        accumulating entries from an earlier application assembly.
+        """
+
+        normalized_kind = str(kind or "").strip()
+        if not normalized_kind:
+            raise ValueError("entrypoint kind is required")
+        normalized_source = str(source or "").strip()
+        normalized_names = {
+            str(item or "").strip()
+            for item in names
+            if str(item or "").strip()
+        }
+        with self._lock:
+            self._discovered[normalized_kind] = {
+                name: normalized_source for name in normalized_names
+            }
+        return self
+
+    def report(self, *, accept_attested: bool = False) -> CoverageReport:
+        """Return strict gaps, or an explicitly labeled attested report.
+
+        ``accept_attested=True`` is for custom queues and framework registries
+        the SDK cannot inspect. It never upgrades those records into verified
+        framework evidence; the returned report identifies that weaker level.
+        """
 
         inventory = self.catalog.inventory()
         known_operations = {
@@ -257,6 +373,8 @@ class CoverageManifest:
             required = tuple(sorted(self._required_operations))
             exemptions = dict(self._exemptions)
             enforced = dict(self._enforced)
+            discovered = {kind: dict(items) for kind, items in self._discovered.items()}
+            framework_observed_kinds = set(self._framework_observed_kinds)
             data_boundaries = dict(self._data_boundaries)
             final_operations = set(self._final_operations)
             issues = list(self._recording_issues)
@@ -285,19 +403,71 @@ class CoverageManifest:
                     )
                 )
 
+        discovered_report: list[dict[str, str]] = []
+        for kind, names in sorted(discovered.items()):
+            catalog_names = {
+                str(binding.get("name") or "").strip()
+                for binding in entrypoints
+                if str(binding.get("kind") or "").strip() == kind
+                and str(binding.get("operation") or "").strip() in active_operations
+            }
+            for name, source in sorted(names.items()):
+                discovered_report.append({"kind": kind, "name": name, "source": source})
+                if name not in catalog_names:
+                    issues.append(
+                        CoverageIssue(
+                            "coverage.discovered_entrypoint_unregistered",
+                            entrypoint=f"{kind}:{name}",
+                            detail="application inventory found this execution boundary without a Catalog mapping",
+                        )
+                    )
+            for name in sorted(catalog_names - set(names)):
+                issues.append(
+                    CoverageIssue(
+                        "coverage.catalog_entrypoint_not_discovered",
+                        entrypoint=f"{kind}:{name}",
+                        detail="Catalog maps this execution boundary but the application inventory did not find it",
+                    )
+                )
+
         for binding in entrypoints:
             operation = str(binding.get("operation") or "").strip()
             if operation not in active_operations:
                 continue
             kind = str(binding.get("kind") or "").strip()
             name = str(binding.get("name") or "").strip()
-            if (kind, name) not in enforced:
+            evidence = enforced.get((kind, name))
+            if not accept_attested and kind not in framework_observed_kinds:
+                issues.append(
+                    CoverageIssue(
+                        "coverage.entrypoint_inventory_attested_only",
+                        operation=operation,
+                        entrypoint=f"{kind}:{name}",
+                        detail=(
+                            "strict coverage requires inventory observed by an SDK framework adapter; "
+                            "application-provided inventory is an attestation"
+                        ),
+                    )
+                )
+            if evidence is None:
                 issues.append(
                     CoverageIssue(
                         "coverage.entrypoint_enforcement_missing",
                         operation=operation,
                         entrypoint=f"{kind}:{name}",
                         detail="no adapter or application guard recorded for this entrypoint",
+                    )
+                )
+            elif not evidence.verified and not accept_attested:
+                issues.append(
+                    CoverageIssue(
+                        "coverage.entrypoint_enforcement_attested_only",
+                        operation=operation,
+                        entrypoint=f"{kind}:{name}",
+                        detail=(
+                            "strict coverage requires framework-observed final guard evidence; "
+                            "this record is an application attestation"
+                        ),
                     )
                 )
 
@@ -353,15 +523,30 @@ class CoverageManifest:
                 item.to_dict()
                 for _, item in sorted(enforced.items(), key=lambda pair: pair[0])
             ),
+            discovered_entrypoints=tuple(discovered_report),
             data_boundaries=tuple(data_report),
             exemptions=exemptions,
             issues=tuple(sorted(unique.values(), key=lambda item: (item.code, item.operation, item.entrypoint))),
+            verification_level="attested" if accept_attested else "strict",
         )
 
     def assert_complete(self) -> CoverageReport:
         """Return a clean report or raise a compact CI-friendly error."""
 
         report = self.report()
+        if not report.ready:
+            raise CoverageError(report)
+        return report
+
+    def assert_attested_complete(self) -> CoverageReport:
+        """Accept host attestations while preserving their weaker provenance.
+
+        This is appropriate for custom task queues or Agent frameworks whose
+        runtime registry cannot be inspected. Prefer :meth:`assert_complete`
+        whenever a framework adapter can produce real assembly evidence.
+        """
+
+        report = self.report(accept_attested=True)
         if not report.ready:
             raise CoverageError(report)
         return report

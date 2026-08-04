@@ -90,7 +90,10 @@ Use `CoverageManifest` once the catalog has more than a single route. It
 checks that every declared operation has an entrypoint and that each declared
 entrypoint has a recorded final guard; it can also require an explicit final
 execution guard for destructive actions and a prompt/data boundary declaration
-for retrieval. Call `coverage.assert_complete()` at startup or in CI after
+for retrieval. Call strict `coverage.assert_complete()` only where the adapter
+can observe the assembled framework boundary; use the explicitly labeled
+`coverage.assert_attested_complete()` plus a real integration test for generic
+tool/task/MCP registries. Run either check at startup or in CI after
 routes, Tools, tasks, and graph nodes are registered. See the
 [coverage guide](coverage.md). This is a governance check over your declared
 inventory, not a source-code scanner for unregistered host paths.
@@ -176,12 +179,14 @@ prompt_context = authorized.candidates  # never use the unfiltered result
 ## Close the high-risk Tool replay window
 
 ```python
-from authz_sdk import AgentRuntime, InMemoryPermitStore
+from authz_sdk import AgentRuntime, RedisPermitStore
 
 runtime = AgentRuntime(authz)
 # Create once during application startup and inject it into each request path.
-# This in-memory variant is only safe for one process.
-permit_store = InMemoryPermitStore()
+# Inject one Redis client shared by every worker. Alternatively use
+# RedisPermitStore.from_url(...) after installing agent-authz-sdk[redis].
+permit_store = RedisPermitStore(redis_client)
+assert runtime.permit_readiness(permit_store, require_shared=True)["ready"]
 permit = runtime.issue_permit(
     execute_request,
     secret=permit_secret,
@@ -197,10 +202,10 @@ result = runtime.consume_permit(
 assert result.status.value == "consumed"
 ```
 
-`consume_permit()` verifies the signed resource-version-bound permit, then reserves its nonce through `PermitStore`. Reuse yields `replayed`. `InMemoryPermitStore` is a one-process reference implementation; multi-worker deployments need an atomic Redis or database implementation. The final write must still verify the resource version in its own transaction.
+`consume_permit()` verifies the signed resource-version-bound permit, then reserves its nonce through `PermitStore`. Reuse yields `replayed`. `RedisPermitStore` uses Redis TTL keys and atomic Lua scripts; the repository's Redis 7 E2E job exercises consumption and revocation from independent Python processes. Its two nonce keys share one Redis hash tag, which is compatible with Redis Cluster scripting, but a Cluster topology/failover run remains a deployment-specific test rather than a blanket operational claim. `runtime.permit_readiness(..., require_shared=True)` rejects the in-memory reference store before a multi-worker service accepts high-risk traffic. If Redis is unavailable, consumption returns `unavailable`; proceed only when the status is `consumed`. The final write must still verify the resource version in its own transaction. See [deployment patterns](deployment.md).
 
 ## What this release can and cannot prove
 
-This SDK gives small teams an embedded, secure-by-default Agent PEP and larger teams portable primitives for a PDP/control plane. It does not replace identity/SSO, a distributed relationship database, a general policy engine, durable policy review/rollout, shared PermitStore/key rotation, immutable audit storage, native SQL/vector query pushdown, or coverage proof for every host path.
+This SDK gives small teams an embedded, secure-by-default Agent PEP and larger teams portable primitives for a PDP/control plane. It does not replace identity/SSO, a distributed relationship database, a general policy engine, durable policy review/rollout, permit key rotation, immutable audit storage, native SQL/vector query pushdown, or coverage proof for every host path.
 
 That boundary is deliberate. The product promise is not another general authorization engine: it is one enforceable Agent operation contract from API and Tool execution through RAG context and background side effects.

@@ -31,7 +31,7 @@ server capability rather than just an in-process callable.
 For a real HTTP boundary, install the optional extra:
 
 ```bash
-python -m pip install "agent-authz-sdk[fastapi] @ git+https://github.com/FrankPlusPlus/agent-authz.git@v0.7.0b3"
+python -m pip install "agent-authz-sdk[fastapi] @ git+https://github.com/FrankPlusPlus/agent-authz.git@v0.7.0b6"
 ```
 
 `FastAPIAuthz` turns a registered API entrypoint into a dependency. The
@@ -75,7 +75,7 @@ template [`fastapi_document_agent.py`](../examples/fastapi_document_agent.py).
 Install the optional official MCP v2 SDK integration:
 
 ```bash
-python -m pip install "agent-authz-sdk[mcp] @ git+https://github.com/FrankPlusPlus/agent-authz.git@v0.7.0b3"
+python -m pip install "agent-authz-sdk[mcp] @ git+https://github.com/FrankPlusPlus/agent-authz.git@v0.7.0b6"
 ```
 
 Bind the public MCP Tool name in `Catalog`, then register the Tool through
@@ -112,6 +112,10 @@ dynamic discovery. In an `Authz.production(...)` runtime, the catalog binding
 above is required by default; use an explicit operation without it only as a
 short-lived, reviewed migration exception. See the full [MCP integration
 guide](mcp.md).
+
+In production, `subject` must also be a request-local provider. A static
+`Subject` requires the explicit `allow_static_subject=True` exception and is
+only suitable for a process dedicated to one principal.
 
 ## Agno
 

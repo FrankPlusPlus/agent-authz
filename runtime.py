@@ -205,6 +205,23 @@ class AgentRuntime:
             )
         return store.consume(permit, now=now)
 
+    def permit_readiness(
+        self,
+        store: Any,
+        *,
+        require_shared: bool = False,
+    ) -> dict[str, object]:
+        """Expose a startup/readiness check for a high-risk permit boundary.
+
+        Set ``require_shared=True`` whenever permits can be consumed by more
+        than one worker, pod, or host. This does not replace an application's
+        resource-version check inside its final write transaction.
+        """
+
+        from authz_sdk.permit_store import permit_store_readiness
+
+        return permit_store_readiness(store, require_shared=require_shared)
+
     def filter_tools(
         self,
         subject: Subject,

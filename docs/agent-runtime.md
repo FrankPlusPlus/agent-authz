@@ -139,7 +139,9 @@ operation again at execution time rather than trusting the enqueue-time check.
   resource-specific.
 - Check again before mounting or executing when side effects matter.
 - Filter every RAG candidate before it becomes prompt context.
-- Consume a destructive-operation permit immediately before the side effect.
+- Consume a destructive-operation permit immediately before the side effect. Use
+  `RedisPermitStore` (not `InMemoryPermitStore`) whenever more than one worker,
+  pod, or host can execute the action; proceed only on `consumed`.
 - Fail closed when a Tool, Pack member, or operation is unknown.
 - Record operation, resource URI, policy ID, entrypoint, and outcome.
 - Do not log secrets, prompts, retrieved document contents, or Tool arguments

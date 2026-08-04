@@ -2,6 +2,7 @@ include CHANGELOG.md
 include CONTRIBUTING.md
 include LICENSE
 include README.md
+include assets/agent-authz-hero.svg
 include ROADMAP.md
 include SECURITY.md
 include SUPPLY_CHAIN.md
@@ -10,6 +11,7 @@ include docs/architecture.md
 include docs/backends.md
 include docs/comparison.md
 include docs/coverage.md
+include docs/deployment.md
 include docs/frameworks.md
 include docs/mcp.md
 include docs/migration.md
@@ -20,6 +22,8 @@ include docs/zh-CN/README.md
 recursive-include examples *.py
 recursive-include integrations *.py
 include py.typed
+# The explicit includes above are the source-distribution allowlist. Archive
+# verification independently rejects every member outside that public set.
 prune tests
 global-exclude .DS_Store
 global-exclude .env
