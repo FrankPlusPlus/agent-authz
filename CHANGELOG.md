@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented here.
 
+## 0.7.0b7 - 2026-08-04
+
+- Corrected the public PyPI publication boundary so the trusted publisher
+  receives only the verified wheel and source distribution; checksums and SBOMs
+  remain GitHub Release assets.
+- Published under the concise canonical distribution name `agent-authz`.
+
 ## 0.7.0b6 - 2026-08-03
 
 - Disabled implicit HTTP(S) proxy discovery in the SDK-owned remote PDP

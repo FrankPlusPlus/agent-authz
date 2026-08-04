@@ -57,7 +57,7 @@ Agent Authz 把这些路径收敛为一个简单契约：
 执行 Permit：
 
 ```bash
-git clone --branch v0.7.0b6 https://github.com/FrankPlusPlus/agent-authz.git
+git clone --branch v0.7.0b7 https://github.com/FrankPlusPlus/agent-authz.git
 cd agent-authz
 python -m venv .venv
 . .venv/bin/activate
@@ -209,12 +209,12 @@ Authz 自己作出决策时可以 fail-closed，但宿主应用仍必须：
 GitHub Release 可用后，部署 wheel 前应验证校验和与 attestation：
 
 ```bash
-gh release download v0.7.0b6 --repo FrankPlusPlus/agent-authz \
-  --pattern 'agent_authz-0.7.0b6-py3-none-any.whl' --pattern WHEEL-SHA256SUMS
+gh release download v0.7.0b7 --repo FrankPlusPlus/agent-authz \
+  --pattern 'agent_authz-0.7.0b7-py3-none-any.whl' --pattern WHEEL-SHA256SUMS
 shasum -a 256 -c WHEEL-SHA256SUMS
-gh attestation verify agent_authz-0.7.0b6-py3-none-any.whl \
+gh attestation verify agent_authz-0.7.0b7-py3-none-any.whl \
   -R FrankPlusPlus/agent-authz
-python -m pip install --no-deps agent_authz-0.7.0b6-py3-none-any.whl
+python -m pip install --no-deps agent_authz-0.7.0b7-py3-none-any.whl
 ```
 
 </details>

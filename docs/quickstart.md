@@ -8,19 +8,19 @@ Install a checked GitHub Release wheel while PyPI publishing is not enabled.
 Verify the downloaded bytes and GitHub provenance before installation:
 
 ```bash
-gh release download v0.7.0b6 --repo FrankPlusPlus/agent-authz \
-  --pattern 'agent_authz-0.7.0b6-py3-none-any.whl' --pattern WHEEL-SHA256SUMS
+gh release download v0.7.0b7 --repo FrankPlusPlus/agent-authz \
+  --pattern 'agent_authz-0.7.0b7-py3-none-any.whl' --pattern WHEEL-SHA256SUMS
 shasum -a 256 -c WHEEL-SHA256SUMS
-gh attestation verify agent_authz-0.7.0b6-py3-none-any.whl \
+gh attestation verify agent_authz-0.7.0b7-py3-none-any.whl \
   -R FrankPlusPlus/agent-authz
-python -m pip install --no-deps agent_authz-0.7.0b6-py3-none-any.whl
+python -m pip install --no-deps agent_authz-0.7.0b7-py3-none-any.whl
 ```
 
 For development or source review, you may install from a reviewed tag, but a
 Git tag is not a release-integrity proof:
 
 ```bash
-python -m pip install "agent-authz @ git+https://github.com/FrankPlusPlus/agent-authz.git@v0.7.0b6"
+python -m pip install "agent-authz @ git+https://github.com/FrankPlusPlus/agent-authz.git@v0.7.0b7"
 ```
 
 See the complete [supply-chain policy](../SUPPLY_CHAIN.md) before using a
