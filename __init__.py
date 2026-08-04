@@ -6,7 +6,7 @@ integrations can bind their entrypoints to the same operation without making
 application developers learn the policy engine internals.
 """
 
-__version__ = "0.7.0b6"
+__version__ = "0.7.0b7"
 
 from authz_sdk.catalog import (
     CRUD_ACTIONS,
