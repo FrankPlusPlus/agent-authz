@@ -98,7 +98,7 @@ def build_sbom(
         else source.stem
     )
     created = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
-    package_id = "SPDXRef-Package-agent-authz-sdk"
+    package_id = "SPDXRef-Package-agent-authz"
     return {
         "spdxVersion": "SPDX-2.3",
         "dataLicense": "CC0-1.0",
@@ -110,7 +110,7 @@ def build_sbom(
         ),
         "creationInfo": {
             "created": created,
-            "creators": ["Tool: agent-authz-sdk/scripts/generate_sbom.py"],
+            "creators": ["Tool: agent-authz/scripts/generate_sbom.py"],
         },
         "packages": [
             {
@@ -129,7 +129,7 @@ def build_sbom(
         "annotations": [
             {
                 "annotationType": "OTHER",
-                "annotator": "Tool: agent-authz-sdk/scripts/generate_sbom.py",
+                "annotator": "Tool: agent-authz/scripts/generate_sbom.py",
                 "annotationDate": created,
                 "comment": (
                     "This SBOM describes the built distribution and its direct runtime "

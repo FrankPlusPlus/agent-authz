@@ -1,7 +1,7 @@
 """Optional FastAPI dependencies for a trusted API authorization boundary.
 
 The module does not import FastAPI at package import time. Install
-``agent-authz-sdk[fastapi]`` only in applications that use this adapter.
+``agent-authz[fastapi]`` only in applications that use this adapter.
 """
 
 from __future__ import annotations
@@ -62,7 +62,7 @@ def _fastapi_types() -> tuple[Any, Any]:
         from fastapi import HTTPException, Request
     except ImportError as exc:  # pragma: no cover - depends on application extra
         raise BackendUnavailableError(
-            "FastAPI is optional; install agent-authz-sdk[fastapi] first"
+            "FastAPI is optional; install agent-authz[fastapi] first"
         ) from exc
     return HTTPException, Request
 

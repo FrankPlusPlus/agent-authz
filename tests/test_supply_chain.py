@@ -53,19 +53,19 @@ def test_sbom_rejects_an_artifact_that_does_not_match_the_expected_project_ident
     with pytest.raises(ValueError, match="does not match pyproject"):
         namespace["build_sbom"](
             artifact,
-            expected_identity=("agent-authz-sdk", "0.7.0b1"),
+            expected_identity=("agent-authz", "0.7.0b1"),
         )
 
 
 def test_distribution_verifier_rejects_credential_shaped_wheel_content(tmp_path: Path) -> None:
     helper = Path(__file__).parents[1] / "scripts" / "verify_distribution.py"
     namespace = runpy.run_path(str(helper))
-    artifact = tmp_path / "agent_authz_sdk-0.7.0b1-py3-none-any.whl"
+    artifact = tmp_path / "agent_authz-0.7.0b1-py3-none-any.whl"
 
     with ZipFile(artifact, "w", compression=ZIP_DEFLATED) as wheel:
         wheel.writestr("authz_sdk/__init__.py", "-----BEGIN PRIVATE KEY-----")
 
-    errors = namespace["_verify_wheel"](artifact, "agent-authz-sdk", "0.7.0b1")
+    errors = namespace["_verify_wheel"](artifact, "agent-authz", "0.7.0b1")
 
     assert any("credential-shaped" in error for error in errors)
 
@@ -89,15 +89,15 @@ def test_manifest_does_not_package_the_test_suite() -> None:
 def test_distribution_verifier_rejects_path_traversal_in_source_archive(tmp_path: Path) -> None:
     helper = Path(__file__).parents[1] / "scripts" / "verify_distribution.py"
     namespace = runpy.run_path(str(helper))
-    artifact = tmp_path / "agent_authz_sdk-0.7.0b1.tar.gz"
+    artifact = tmp_path / "agent_authz-0.7.0b1.tar.gz"
 
     with tarfile.open(artifact, "w:gz") as distribution:
         content = b"unexpected"
-        member = tarfile.TarInfo("agent_authz_sdk-0.7.0b1/../../escaped.py")
+        member = tarfile.TarInfo("agent_authz-0.7.0b1/../../escaped.py")
         member.size = len(content)
         distribution.addfile(member, io.BytesIO(content))
 
-    errors = namespace["_verify_sdist"](artifact, "agent-authz-sdk", "0.7.0b1")
+    errors = namespace["_verify_sdist"](artifact, "agent-authz", "0.7.0b1")
 
     assert any("unsafe member path" in error for error in errors)
 
@@ -107,27 +107,27 @@ def test_distribution_verifier_rejects_wheel_record_hash_or_size_tampering(
 ) -> None:
     helper = Path(__file__).parents[1] / "scripts" / "verify_distribution.py"
     namespace = runpy.run_path(str(helper))
-    artifact = tmp_path / "agent_authz_sdk-0.7.0b1-py3-none-any.whl"
+    artifact = tmp_path / "agent_authz-0.7.0b1-py3-none-any.whl"
     package = b"__version__ = '0.7.0b1'\n"
-    metadata = b"Metadata-Version: 2.4\nName: agent-authz-sdk\nVersion: 0.7.0b1\n\n"
+    metadata = b"Metadata-Version: 2.4\nName: agent-authz\nVersion: 0.7.0b1\n\n"
     wheel = b"Wheel-Version: 1.0\nGenerator: test\nRoot-Is-Purelib: true\nTag: py3-none-any\n"
     record = "\n".join(
         (
             "authz_sdk/__init__.py,sha256=invalid,999",
-            "agent_authz_sdk-0.7.0b1.dist-info/METADATA,,",
-            "agent_authz_sdk-0.7.0b1.dist-info/WHEEL,,",
-            "agent_authz_sdk-0.7.0b1.dist-info/top_level.txt,,",
-            "agent_authz_sdk-0.7.0b1.dist-info/RECORD,,",
+            "agent_authz-0.7.0b1.dist-info/METADATA,,",
+            "agent_authz-0.7.0b1.dist-info/WHEEL,,",
+            "agent_authz-0.7.0b1.dist-info/top_level.txt,,",
+            "agent_authz-0.7.0b1.dist-info/RECORD,,",
         )
     )
     with ZipFile(artifact, "w", compression=ZIP_DEFLATED) as distribution:
         distribution.writestr("authz_sdk/__init__.py", package)
-        distribution.writestr("agent_authz_sdk-0.7.0b1.dist-info/METADATA", metadata)
-        distribution.writestr("agent_authz_sdk-0.7.0b1.dist-info/WHEEL", wheel)
-        distribution.writestr("agent_authz_sdk-0.7.0b1.dist-info/top_level.txt", "authz_sdk\n")
-        distribution.writestr("agent_authz_sdk-0.7.0b1.dist-info/RECORD", record)
+        distribution.writestr("agent_authz-0.7.0b1.dist-info/METADATA", metadata)
+        distribution.writestr("agent_authz-0.7.0b1.dist-info/WHEEL", wheel)
+        distribution.writestr("agent_authz-0.7.0b1.dist-info/top_level.txt", "authz_sdk\n")
+        distribution.writestr("agent_authz-0.7.0b1.dist-info/RECORD", record)
 
-    errors = namespace["_verify_wheel"](artifact, "agent-authz-sdk", "0.7.0b1")
+    errors = namespace["_verify_wheel"](artifact, "agent-authz", "0.7.0b1")
 
     assert any("RECORD hash mismatch: authz_sdk/__init__.py" in error for error in errors)
     assert any("RECORD size mismatch: authz_sdk/__init__.py" in error for error in errors)

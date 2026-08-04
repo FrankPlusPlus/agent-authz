@@ -184,7 +184,7 @@ from authz_sdk import AgentRuntime, RedisPermitStore
 runtime = AgentRuntime(authz)
 # Create once during application startup and inject it into each request path.
 # Inject one Redis client shared by every worker. Alternatively use
-# RedisPermitStore.from_url(...) after installing agent-authz-sdk[redis].
+# RedisPermitStore.from_url(...) after installing agent-authz[redis].
 permit_store = RedisPermitStore(redis_client)
 assert runtime.permit_readiness(permit_store, require_shared=True)["ready"]
 permit = runtime.issue_permit(

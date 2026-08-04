@@ -31,7 +31,7 @@ def _redis_url() -> str:
     if not url:
         pytest.skip("set AUTHZ_REDIS_URL to run real Redis permit E2E tests")
     if find_spec("redis") is None:
-        pytest.skip("install agent-authz-sdk[redis] to run real Redis permit E2E tests")
+        pytest.skip("install agent-authz[redis] to run real Redis permit E2E tests")
     return url
 
 

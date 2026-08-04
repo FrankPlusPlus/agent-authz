@@ -238,7 +238,7 @@ return was_revoked
             from redis import Redis
         except ImportError as exc:  # pragma: no cover - depends on optional dependency
             raise ImportError(
-                "RedisPermitStore.from_url requires the redis extra; install agent-authz-sdk[redis]"
+                "RedisPermitStore.from_url requires the redis extra; install agent-authz[redis]"
             ) from exc
         return cls(Redis.from_url(url, **kwargs), prefix=prefix)
 
