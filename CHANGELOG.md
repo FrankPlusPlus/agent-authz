@@ -2,8 +2,58 @@
 
 All notable changes to this project will be documented here.
 
+## 0.7.0b6 - 2026-08-03
+
+- Disabled implicit HTTP(S) proxy discovery in the SDK-owned remote PDP
+  transport. Decision payloads now go only to the configured PDP endpoint;
+  deployments that need egress mediation must make that gateway the explicit
+  endpoint.
+- Made the MCP beta adapter reject a static `Subject` in production by
+  default. Shared MCP servers must provide request-local verified identity;
+  a dedicated single-principal process must explicitly opt in with
+  `allow_static_subject=True`.
+- Declared the v0.7 core request and enforcement contracts stable through the
+  Beta line so future adapter/observability work does not force business-call
+  site rewrites.
+
+## 0.7.0b5 - 2026-08-03
+
+- Made coverage evidence materially stronger at framework boundaries. FastAPI
+  coverage now inspects the assembled dependency graph and accepts only an
+  attached SDK guard for the exact HTTP method/path; constructing an unused
+  dependency or adding a manual record cannot claim verified route coverage.
+- Added `record_tool_inventory()` for the exact callable list handed to a
+  Python Agent/runtime. It reports an unguarded callable, stale Catalog
+  binding, or a protected wrapper that was not supplied to that list. Because
+  a generic framework registry is not inspectable, this is an explicitly
+  labeled host attestation, not strict deployment evidence.
+- Made `MCPAuthz` record an attested `mcp.tool` guard only after the MCP
+  server's `tool()` decorator accepts the guarded callable; direct MCP server
+  registration remains explicitly out of the adapter's inventory scope.
+- Added a runnable FastAPI + Casbin reference showing the intended division of
+  responsibility: Casbin decides policy while Agent Authz maps the HTTP
+  execution boundary, resolves trusted resources, and checks coverage.
+
+## 0.7.0b4 - 2026-08-02
+
+- Added FastAPI runtime registration inventory to `CoverageManifest`. It
+  compares live application routes, including mounted sub-applications, with
+  catalog mappings and reports unregistered or stale API entrypoints without
+  claiming universal source-code discovery.
+- Added opt-in real Redis cross-process permit E2E tests and a Redis 7 GitHub
+  Actions job for one-time consumption, cross-process revocation, and
+  fail-closed shared-store behavior.
+- Added deployment guidance for single-process, multi-worker, and distributed
+  PEP / remote-PDP deployments, and clarified that Redis Cluster/failover
+  attestation remains environment-specific.
+
 ## 0.7.0b3 - 2026-07-31
 
+- Added `RedisPermitStore`, an optional-dependency, shared Redis implementation
+  of the existing `PermitStore` contract. It uses TTL-backed atomic Lua
+  consumption/revocation and returns an explicit fail-closed `unavailable`
+  status when the shared store cannot be reached; `InMemoryPermitStore` remains
+  the documented single-process reference implementation.
 - Closed final independent-review production races: an accepted evaluator now
   rejects every ordinary attribute write/deletion (including a new field or
   `__class__`), and each request snapshots catalog, policies, resource

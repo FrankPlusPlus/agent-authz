@@ -5,7 +5,9 @@ from __future__ import annotations
 import functools
 import inspect
 from dataclasses import dataclass
-from typing import Any, Callable, Mapping, TypeVar, overload
+from threading import RLock
+from typing import Any, Callable, Iterable, Mapping, TypeVar, overload
+from weakref import WeakKeyDictionary
 
 from authz_sdk.coverage import CoverageManifest
 from authz_sdk.models import Resource, Subject
@@ -14,6 +16,8 @@ from authz_sdk.runtime import AgentRequest, AgentRuntime
 
 T = TypeVar("T", bound=Callable[..., Any])
 ValueProvider = Any | Callable[["CallInput"], Any]
+_TOOL_GUARDS: WeakKeyDictionary[Callable[..., Any], tuple[str, str, str, str]] = WeakKeyDictionary()
+_TOOL_GUARDS_LOCK = RLock()
 
 
 @dataclass(frozen=True)
@@ -87,13 +91,80 @@ def _request(
 
 
 def _mark_wrapper(
-    wrapper: Callable[..., Any], *, operation: str, phase: str
+    wrapper: Callable[..., Any],
+    *,
+    operation: str,
+    phase: str,
+    entrypoint_kind: str,
+    entrypoint_name: str,
 ) -> Callable[..., Any]:
     # Agent frameworks use these attributes while building tool schemas.
     setattr(wrapper, "authz_operation", operation)
     setattr(wrapper, "authz_phase", phase)
     setattr(wrapper, "authz_protected", True)
+    # These public attributes support framework schema generation. Coverage
+    # uses the private registry below, so attaching lookalike attributes to an
+    # arbitrary callable cannot impersonate an SDK-created guard.
+    setattr(wrapper, "authz_entrypoint_kind", entrypoint_kind)
+    setattr(wrapper, "authz_entrypoint_name", entrypoint_name)
+    with _TOOL_GUARDS_LOCK:
+        _TOOL_GUARDS[wrapper] = (entrypoint_kind, entrypoint_name, operation, phase)
     return wrapper
+
+
+def record_tool_inventory(
+    coverage: CoverageManifest,
+    tools: Iterable[Callable[..., Any]],
+    *,
+    kind: str = "tool",
+    source: str = "Tool registry",
+) -> "CoverageReport":
+    """Attest final guards in the callable list supplied to an Agent runtime.
+
+    Call this after building the exact list passed to an Agent, graph, or
+    custom Tool registry.  It is intentionally a registry check rather than a
+    source scanner: it validates the provided list, and cannot discover or
+    observe a separate framework registration the application never supplies
+    here. Use ``CoverageManifest.assert_attested_complete()`` for this result.
+    """
+
+    if not isinstance(coverage, CoverageManifest):
+        raise TypeError("coverage must be a CoverageManifest")
+    normalized_kind = str(kind or "").strip()
+    if not normalized_kind:
+        raise ValueError("entrypoint kind is required")
+
+    assembled: dict[str, Callable[..., Any]] = {}
+    for tool in tools:
+        if not callable(tool):
+            raise TypeError("tools must contain callables")
+        with _TOOL_GUARDS_LOCK:
+            guard = _TOOL_GUARDS.get(tool)
+        marked_name = str(guard[1] if guard is not None else "").strip()
+        name = marked_name or str(getattr(tool, "__name__", "") or "").strip()
+        if not name:
+            raise ValueError("each tool must have a name or authz entrypoint marker")
+        if name in assembled and assembled[name] is not tool:
+            raise ValueError(f"duplicate tool inventory name: {name!r}")
+        assembled[name] = tool
+
+    coverage.record_inventory(
+        normalized_kind,
+        assembled,
+        source=source,
+    )
+    for name, tool in assembled.items():
+        with _TOOL_GUARDS_LOCK:
+            guard = _TOOL_GUARDS.get(tool)
+        if guard is not None and guard[0] == normalized_kind and guard[1] == name and guard[3] == "execute":
+            coverage.record_enforcement(
+                normalized_kind,
+                name,
+                operation=guard[2],
+                final=True,
+                evidence=f"{source}: {name}",
+            )
+    return coverage.report()
 
 
 @overload
@@ -244,14 +315,26 @@ def protect_tool(
             authorize(args, kwargs)
             return await tool(*args, **kwargs)
 
-        return _mark_wrapper(async_wrapper, operation=operation, phase=phase)  # type: ignore[return-value]
+        return _mark_wrapper(
+            async_wrapper,
+            operation=operation,
+            phase=phase,
+            entrypoint_kind=coverage_kind,
+            entrypoint_name=name,
+        )  # type: ignore[return-value]
 
     @functools.wraps(tool)
     def wrapper(*args: Any, **kwargs: Any) -> Any:
         authorize(args, kwargs)
         return tool(*args, **kwargs)
 
-    return _mark_wrapper(wrapper, operation=operation, phase=phase)  # type: ignore[return-value]
+    return _mark_wrapper(
+        wrapper,
+        operation=operation,
+        phase=phase,
+        entrypoint_kind=coverage_kind,
+        entrypoint_name=name,
+    )  # type: ignore[return-value]
 
 
-__all__ = ["CallInput", "protect_tool"]
+__all__ = ["CallInput", "protect_tool", "record_tool_inventory"]

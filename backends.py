@@ -1034,7 +1034,17 @@ def _urllib_transport(
     )
     try:
         https_handler = urllib.request.HTTPSHandler(context=ssl_context)
-        opener = urllib.request.build_opener(_NoRedirectHandler(), https_handler)
+        # A PEP decision can carry stable principal and resource coordinates.
+        # Do not silently widen the set of network recipients by inheriting a
+        # developer workstation's HTTP(S) proxy configuration.  A deployment
+        # that deliberately needs an egress proxy must put a reviewed gateway
+        # at the configured PDP endpoint instead of making the standard
+        # production transport depend on ambient process state.
+        opener = urllib.request.build_opener(
+            urllib.request.ProxyHandler({}),
+            _NoRedirectHandler(),
+            https_handler,
+        )
         with opener.open(request, timeout=timeout) as response:
             raw = response.read().decode("utf-8")
     except (urllib.error.URLError, TimeoutError) as exc:

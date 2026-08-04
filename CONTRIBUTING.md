@@ -16,6 +16,11 @@ python -m venv .venv
 .venv/bin/python -m pytest
 ```
 
+The MCP adapter targets the `mcp>=2,<3` extra. Run its integration tests only
+from an environment created with `.[dev]` (or the hash-locked release
+requirements); an unrelated environment with MCP 1.x is not a compatibility
+result for this package.
+
 ## Before opening a pull request
 
 1. Read the public contract in `README.md` and the architecture guide.

@@ -58,6 +58,7 @@ PUBLIC_DOCS = frozenset(
         "docs/backends.md",
         "docs/comparison.md",
         "docs/coverage.md",
+        "docs/deployment.md",
         "docs/frameworks.md",
         "docs/mcp.md",
         "docs/migration.md",
@@ -67,11 +68,14 @@ PUBLIC_DOCS = frozenset(
         "docs/zh-CN/README.md",
     }
 )
+PUBLIC_ASSETS = frozenset({"assets/agent-authz-hero.svg"})
 PUBLIC_EXAMPLES = frozenset(
     {
         "examples/agent_entrypoints.py",
         "examples/basic.py",
+        "examples/fastapi_casbin_coverage.py",
         "examples/fastapi_document_agent.py",
+        "assets/agent-authz-hero.svg",
         "examples/secure_document_agent.py",
     }
 )
@@ -96,9 +100,11 @@ REQUIRED_SDIST_MEMBERS = frozenset(
         "SUPPLY_CHAIN.md",
         "CONTRIBUTING.md",
         "docs/production.md",
+        "docs/deployment.md",
         "docs/mcp.md",
         "examples/secure_document_agent.py",
         "examples/fastapi_document_agent.py",
+        "examples/fastapi_casbin_coverage.py",
     }
 )
 EGG_INFO_FILES = frozenset(
@@ -188,6 +194,7 @@ def _wheel_allowed_member(member: str) -> bool:
 def _sdist_allowed_member(relative: str) -> bool:
     if (
         relative in PUBLIC_ROOT_FILES
+        or relative in PUBLIC_ASSETS
         or relative in GENERATED_SDIST_ROOT_FILES
         or relative in PUBLIC_DOCS
         or relative in PUBLIC_EXAMPLES

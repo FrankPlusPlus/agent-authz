@@ -237,7 +237,7 @@ def run_demo() -> dict[str, Any]:
         store=permit_store,
         now=101.0,
     )
-    coverage_report = coverage.assert_complete()
+    coverage_report = coverage.assert_attested_complete()
 
     return {
         "api_allowed": api.allowed,

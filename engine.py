@@ -58,6 +58,7 @@ _PRODUCTION_FACADE_REVIEWED_ATTRIBUTES = frozenset(
     {
         "authorize",
         "can",
+        "preflight",
         "can_entrypoint",
         "check_many",
         "explain",
@@ -1862,6 +1863,85 @@ class Authz:
             _production_boundary_snapshot=production_boundary_snapshot,
         )
 
+    def preflight(
+        self,
+        subject: Subject | object,
+        *,
+        action: str = "",
+        operation: str = "",
+        context: Mapping[str, Any] | None = None,
+        entrypoint: str = "",
+    ) -> Decision:
+        """Evaluate a non-authoritative discovery or mount preflight.
+
+        A resource-scoped operation cannot be executed without its trusted
+        object.  Discovery still needs a useful coarse answer, however, so
+        this method evaluates subject-only rules and treats the operation's
+        resource-dependent default as deferred.  It never changes ``can``:
+        callers must invoke ``can`` again with the trusted resource before any
+        data read or side effect.
+        """
+
+        operation_name = str(operation or "").strip()
+        definition = self.catalog.operation_definition(operation_name) if self.catalog else None
+        if definition is None or not definition.requires_resource:
+            return self.can(
+                subject,
+                action=action,
+                operation=operation_name,
+                context=context,
+                entrypoint=entrypoint,
+            )
+
+        # Production facades keep their strict boundary for every evaluation;
+        # a host that wants discovery should register a resource-free
+        # visibility operation and map execution to the resource operation.
+        if _is_production_facade(self):
+            return self.can(
+                subject,
+                action=action,
+                operation=operation_name,
+                context=context,
+                entrypoint=entrypoint,
+            )
+
+        # Evaluate the same bindings, but make the resource-dependent fallback
+        # explicitly deferred. Subject-only deny rules still win; relation
+        # rules cannot accidentally be treated as a grant without an object.
+        operation_defaults = {
+            name: dict(value)
+            for name, value in self.policies.operation_defaults.items()
+        }
+        operation_defaults[operation_name] = {
+            **dict(operation_defaults.get(operation_name) or {}),
+            "default_effect": "allow",
+        }
+        preflight_policies = PolicySet(
+            self.policies._bindings,
+            combining=self.policies.combining,
+            default_effect=self.policies.default_effect,
+            version=self.policies.version,
+            operation_defaults=operation_defaults,
+        )
+        preflight_engine = Authz(
+            self.catalog,
+            preflight_policies,
+            self.resources,
+            evaluator=self.evaluator,
+            catalog_mode=self.catalog_mode,
+            tenant_boundary=self.tenant_boundary,
+            require_tenant_context=self.require_tenant_context,
+            require_trusted_resource=self.require_trusted_resource,
+        )
+        return preflight_engine._can(
+            subject,
+            action=action,
+            operation=operation_name,
+            context={**dict(context or {}), "resource_loaded": False},
+            entrypoint=entrypoint,
+            _allow_resource_less_preflight=True,
+        )
+
     def _can_agent(
         self,
         subject: Subject | object,
@@ -1909,6 +1989,7 @@ class Authz:
         catalog_fingerprint: str = "",
         _production_evaluator_snapshot: _ProductionEvaluatorSnapshot | None = None,
         _production_boundary_snapshot: _ProductionBoundarySnapshot | None = None,
+        _allow_resource_less_preflight: bool = False,
     ) -> Decision:
         actor = subject if isinstance(subject, Subject) else Subject.from_user(subject)
         request_context = dict(context or {})
@@ -2151,6 +2232,7 @@ class Authz:
             and definition is not None
             and definition.requires_resource
             and target is None
+            and not _allow_resource_less_preflight
         ):
             return Decision(False, operation_name, reason="a trusted resource is required", reason_code="resource.required", resource=None, entrypoint=entrypoint, policy_version=policies.version)
         if (

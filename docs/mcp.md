@@ -6,7 +6,7 @@ immediately before the registered Python Tool executes, while keeping MCP
 optional from the SDK's core dependency graph.
 
 ```bash
-python -m pip install "agent-authz-sdk[mcp] @ git+https://github.com/FrankPlusPlus/agent-authz.git@v0.7.0b3"
+python -m pip install "agent-authz-sdk[mcp] @ git+https://github.com/FrankPlusPlus/agent-authz.git@v0.7.0b6"
 ```
 
 The optional extra is currently constrained to `mcp>=2,<3`; the integration is
@@ -59,7 +59,9 @@ def read_document(document_id: str) -> dict[str, str]:
     return repository.read(document_id)
 
 
-coverage.assert_complete()
+# MCPAuthz records a host attestation after mcp.tool() accepts the callable.
+# Use strict completion only with an additional server-registry verifier.
+coverage.assert_attested_complete()
 ```
 
 For an `Authz.production(...)` runtime, this catalog binding is mandatory by
@@ -71,6 +73,13 @@ string. That makes MCP execution surfaces visible to the catalog and
 way to bypass production coverage governance. If a catalog already binds the
 same `mcp.tool` entrypoint, an operation mismatch always fails during server
 assembly instead of waiting for a request.
+
+Production MCP servers also require `subject` to be a request-local provider.
+This makes a shared server fail at assembly time if it accidentally captures
+one user's `Subject` and would reuse it for every client. A process that is
+genuinely dedicated to one principal may opt in explicitly with
+`allow_static_subject=True`; that exception is not appropriate for a shared or
+multi-tenant MCP server.
 
 ## What the adapter protects
 
@@ -90,8 +99,9 @@ verified MCP identity + Tool arguments
 - A denied call never invokes the Tool callable.
 - In the production profile, Tool arguments supply only resource coordinates;
   tenant and relation facts come from `ResourceRegistry`.
-- A `CoverageManifest` records the `mcp.tool` final guard, so missing/mismapped
-  registered capability surfaces can fail CI.
+- A `CoverageManifest` records an attested `mcp.tool` guard after the server
+  decorator accepts it, so stale catalog mappings fail CI without pretending
+  to inspect every MCP server's private registry.
 - The adapter preserves sync/async callable metadata for MCP schema generation.
 
 ## Boundaries MCPAuthz does not pretend to solve
@@ -107,6 +117,11 @@ request-local value established by verified MCP authentication or host
 middleware. It must never derive identity from Tool arguments. `MCPAuthz`
 cannot cryptographically prove that a provider is verified; it is the host's
 identity boundary.
+
+`MCPAuthz` inventories Tools registered through that adapter. A Tool added
+directly with `mcp.tool()` outside the adapter is deliberately outside this
+inventory; register all protected business Tools through one `MCPAuthz`
+assembly point rather than treating the SDK as a source-code scanner.
 
 This is deliberate: visibility is not the final security boundary. The Tool
 must still be checked after the real resource coordinate is known and just

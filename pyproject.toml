@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "agent-authz-sdk"
-version = "0.7.0b3"
+version = "0.7.0b6"
 description = "A secure-by-default authorization PEP for APIs, Agent tools, RAG, and tasks"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -41,6 +41,9 @@ fastapi = [
 mcp = [
     "mcp>=2,<3",
 ]
+redis = [
+    "redis>=5,<7",
+]
 dev = [
     "build>=1.2",
     "casbin>=1.36,<2",
@@ -54,6 +57,9 @@ dev = [
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
+markers = [
+    "redis_e2e: requires AUTHZ_REDIS_URL and a real Redis-compatible server",
+]
 
 [tool.setuptools]
 include-package-data = false

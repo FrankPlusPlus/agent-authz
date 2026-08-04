@@ -8,19 +8,19 @@ Install a checked GitHub Release wheel while PyPI publishing is not enabled.
 Verify the downloaded bytes and GitHub provenance before installation:
 
 ```bash
-gh release download v0.7.0b3 --repo FrankPlusPlus/agent-authz \
-  --pattern 'agent_authz_sdk-0.7.0b3-py3-none-any.whl' --pattern WHEEL-SHA256SUMS
+gh release download v0.7.0b6 --repo FrankPlusPlus/agent-authz \
+  --pattern 'agent_authz_sdk-0.7.0b6-py3-none-any.whl' --pattern WHEEL-SHA256SUMS
 shasum -a 256 -c WHEEL-SHA256SUMS
-gh attestation verify agent_authz_sdk-0.7.0b3-py3-none-any.whl \
+gh attestation verify agent_authz_sdk-0.7.0b6-py3-none-any.whl \
   -R FrankPlusPlus/agent-authz
-python -m pip install --no-deps agent_authz_sdk-0.7.0b3-py3-none-any.whl
+python -m pip install --no-deps agent_authz_sdk-0.7.0b6-py3-none-any.whl
 ```
 
 For development or source review, you may install from a reviewed tag, but a
 Git tag is not a release-integrity proof:
 
 ```bash
-python -m pip install "agent-authz-sdk @ git+https://github.com/FrankPlusPlus/agent-authz.git@v0.7.0b3"
+python -m pip install "agent-authz-sdk @ git+https://github.com/FrankPlusPlus/agent-authz.git@v0.7.0b6"
 ```
 
 See the complete [supply-chain policy](../SUPPLY_CHAIN.md) before using a
@@ -31,7 +31,7 @@ security-sensitive release.
 For a service, start with `Authz.production(...)`, a stable `Subject.id`, and
 a `ResourceRegistry` loader. The caller supplies only a resource coordinate;
 the loader supplies tenant and relationship facts. The root
-[README](../README.md#a-safe-five-minute-integration) has the complete safe
+[README](../README.md#a-minimal-production-shaped-guard) has the complete safe
 first example. The direct `Resource(...)` example below is deliberately kept
 as a compact unit-test illustration, not as a production request boundary.
 

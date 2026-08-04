@@ -1,117 +1,107 @@
-# Agent Authz
+<h1 align="center">Agent Authz</h1>
 
-> **Public beta — GitHub Release · Python 3.11+ · Apache-2.0**
+<p align="center">
+  <strong>Authorization integrity at the moment an Agent action executes.</strong><br>
+  One business operation · every registered path · one final decision before work happens.
+</p>
 
-## One business operation, guarded where it executes
+<p align="center">
+  <a href="docs/architecture.md"><img src="https://img.shields.io/badge/boundary-execution%20PEP-7c5cff?style=flat-square" alt="Execution PEP"></a>
+  <a href="https://github.com/FrankPlusPlus/agent-authz/actions/workflows/ci.yml"><img src="https://github.com/FrankPlusPlus/agent-authz/actions/workflows/ci.yml/badge.svg?branch=main&style=flat-square" alt="CI status"></a>
+  <img src="https://img.shields.io/badge/status-public%20beta-f59e0b?style=flat-square" alt="Public beta">
+  <img src="https://img.shields.io/badge/python-3.11%2B-3776AB?style=flat-square&logo=python&logoColor=white" alt="Python 3.11 or newer">
+  <img src="https://img.shields.io/badge/license-Apache--2.0-2f80ed?style=flat-square" alt="Apache 2.0 license">
+</p>
 
-Protect the same SaaS operation before a FastAPI route, Python Agent Tool, MCP
-v2 Tool, retrieval boundary, or task runs.
+<p align="center">
+  <a href="#start-here"><img src="https://img.shields.io/badge/START-Quickstart-1e3a8a?style=flat-square" alt="Quickstart"></a>
+  <a href="#why-agent-authz"><img src="https://img.shields.io/badge/WHY-Execution%20integrity-312e81?style=flat-square" alt="Why Agent Authz"></a>
+  <a href="#proof-not-promises"><img src="https://img.shields.io/badge/PROOF-Coverage%20evidence-0f766e?style=flat-square" alt="Coverage evidence"></a>
+  <a href="docs/quickstart.md"><img src="https://img.shields.io/badge/DOCS-Read%20the%20guide-334155?style=flat-square" alt="Documentation"></a>
+  <a href="docs/zh-CN/README.md"><img src="https://img.shields.io/badge/语言-中文-334155?style=flat-square" alt="中文说明"></a>
+</p>
 
-Agent Authz is an embedded Python authorization PEP. Your service supplies a
-verified identity and trusted tenant/resource facts; Authz maps registered
-entrypoints to one business operation and performs the final allow/deny check.
-Use the native evaluator or retain an existing policy backend.
+<p align="center">
+  <img src="assets/agent-authz-hero.svg" alt="API, Agent Tool, MCP Tool, worker, and retrieval paths converge on one business operation before an allow or deny decision" width="960">
+</p>
 
-It is **not** a PDP, relationship database, identity provider, vector database,
-Agent framework, or hosted control plane. It protects the boundaries you
-explicitly register and route through it; it cannot discover an unwrapped path.
+Agent Authz is an embedded Python **Policy Enforcement Point (PEP)** for the
+moment an agent action actually runs. It maps a registered API route, Agent
+Tool, MCP Tool, retrieval boundary, or worker to a business operation; loads
+trusted tenant and resource facts; then allows or denies before protected data
+is returned or a side effect begins.
 
-**Use it when** one business operation crosses API, Agent Tool, MCP, RAG, or
-task boundaries and you need the same final decision over a trusted resource.
-**Use a dedicated PDP or relationship database alongside it** when you need
-policy distribution, tuple writes, global consistency, or a hosted control plane.
+It works beside the policy system you already use. Your application continues
+to own identity, business data, transactions, and policy distribution.
 
-~~~
-verified subject  →  business operation  →  trusted resource  →  decision
-~~~
+## The execution-integrity loop
 
-## Install and prove it
+| 1. Name the action | 2. Guard the execution | 3. Prove the coverage |
+| --- | --- | --- |
+| Map `document.publish` once, rather than inventing a check per surface. | Put the guard immediately before the route handler, Tool callable, MCP callable, retrieval result, or worker side effect. | Compare registered paths, Catalog bindings, and final guards in CI. |
 
-Until PyPI publishing is explicitly enabled, use the checked GitHub Release
-wheel—not an unverified package name. Download its checksum alongside it:
+```text
+API route ─┐
+Agent Tool ├──> document.publish ──> trusted facts ──> allow / deny ──> side effect
+MCP Tool  ─┤
+worker    ─┤
+retrieval ─┘
+```
 
-~~~bash
-gh release download v0.7.0b3 --repo FrankPlusPlus/agent-authz \
-  --pattern 'agent_authz_sdk-0.7.0b3-py3-none-any.whl' --pattern WHEEL-SHA256SUMS
-shasum -a 256 -c WHEEL-SHA256SUMS
-gh attestation verify agent_authz_sdk-0.7.0b3-py3-none-any.whl \
-  -R FrankPlusPlus/agent-authz
-python -m pip install --no-deps agent_authz_sdk-0.7.0b3-py3-none-any.whl
-~~~
+## Start here
 
-For a transparent integration checkout and executable proof, use the release
-tag for development and source review. A Git tag is not a content-addressed
-release proof; verify the release wheel above for a deployed artifact:
+Clone the public Beta and run the dependency-free end-to-end example:
 
-~~~bash
-git clone --branch v0.7.0b3 https://github.com/FrankPlusPlus/agent-authz.git
+```bash
+git clone https://github.com/FrankPlusPlus/agent-authz.git
 cd agent-authz
 python -m venv .venv
 . .venv/bin/activate
-python -m pip install -e '.[dev]'
+python -m pip install -e .
 python examples/secure_document_agent.py
-~~~
+```
 
-The dependency-free demo asserts that an API and Tool allow the same authorized
-operation, a direct Tool call is denied, a cross-tenant request is denied, an
-unauthorized retrieval candidate stays out of the prompt, and a final permit is
-consumed once.
+It exercises the real model of the SDK—not a toy allow-list:
 
-For a reviewed source-tag dependency during development or source review (not
-as a release-integrity proof):
+```text
+api_allowed=True          tool_allowed=True
+tool_denied=True          cross_tenant_denied=True
+permitted_chunk_ids=['chunk-public']
+permit_status='consumed'  coverage_ready=True
+```
 
-~~~bash
-python -m pip install "agent-authz-sdk @ git+https://github.com/FrankPlusPlus/agent-authz.git@v0.7.0b3"
-~~~
+Then follow the [five-minute quickstart](docs/quickstart.md), or jump straight
+to [FastAPI, Tool, MCP, and framework integrations](docs/frameworks.md).
 
-**Start here:** [Protect an MCP Tool](docs/mcp.md) ·
-[Add a FastAPI route](docs/frameworks.md#fastapi) ·
-[Support matrix](#support-matrix) · [Beta scope](#beta-scope) ·
-[中文](docs/zh-CN/README.md)
+## Why Agent Authz
 
-## Why it exists
+An agent can reach the same business action through far more than an HTTP
+endpoint. A route guard alone does not protect a Tool called directly; a policy
+engine alone cannot show whether every executable path applied that policy.
 
-"document.publish" may be reached through an HTTP route, a Tool, an MCP server,
-a background task, or a retrieval workflow. Framework hooks make it easy to add
-one check; they do not guarantee each entrypoint asks the same business question
-about the same trusted resource.
-An **entrypoint** is simply that execution surface: a route, callable Tool, MCP
-Tool, retrieval boundary, or task.
+| Keep using | Agent Authz adds |
+| --- | --- |
+| **Casbin, OPA, Cerbos, OpenFGA, SpiceDB** | A common execution contract and a final guard at Python application boundaries. |
+| **FastAPI, MCP, agent frameworks** | A way to map their heterogeneous entrypoints to one operation vocabulary. |
+| **Your database and identity provider** | Trusted resource loading: tenant, ownership, and relations come from host-owned data, never model output. |
+| **Your CI and audit stack** | Coverage evidence, decision metadata, and privacy-safe audit primitives. |
 
-~~~
-POST /documents/{id}/publish ─┐
-tool: publish_document         ├─ document.publish ─ trusted document ─ decision
-mcp: publish_document          │
-task: publish_scheduled        ┘
-~~~
+That is the product boundary: **Agent Authz is not a PDP, IAM system,
+relationship database, vector database, agent framework, gateway, or hosted
+control plane.** It is the thin runtime layer that keeps authorization from
+drifting at the execution boundary.
 
-Agent Authz provides the contract around that drift:
+## A minimal production-shaped guard
 
-- A typed Catalog maps one business operation to declared entrypoints.
-- ResourceRegistry loads tenant and relationship facts from host-owned data,
-  rather than trusting model output, request JSON, or Tool arguments.
-- API, callable Tool, MCP, RAG, and task integrations share an
-  AgentRequest → Decision contract.
-- CoverageManifest makes **declared** final guards and data boundaries testable
-  in CI. It is governance inventory, not automatic bypass discovery.
-- Permits, audit events, and candidate filtering provide explicit high-risk
-  primitives without pretending to be a distributed control plane.
+Define the resource and policy once. The loader is owned by the host service,
+so the model cannot assert tenant or relationship facts for itself.
 
-## A safe five-minute integration
-
-The request supplies a resource coordinate. Your loader owns tenant and
-relationship facts. This is the recommended production-shaped path.
-
-~~~python
+```python
 from authz_sdk import Authz, Catalog, PolicySet, ResourceRegistry, Subject
 
 catalog = Catalog()
-catalog.resource(
-    "document",
-    actions=("read",),
-    relations=("viewer",),
-    tenant_required=True,
-)
+catalog.resource("document", actions=("read",), relations=("viewer",), tenant_required=True)
+
 policies = PolicySet()
 policies.bind(
     id="document_viewers_read",
@@ -121,27 +111,23 @@ policies.bind(
 )
 
 documents = {
-    "doc-1": {
-        "tenant_id": "acme",
-        "viewers": {"alice"},
-        "body": "Quarterly plan",
-    }
+    "doc-1": {"tenant_id": "acme", "viewers": {"alice"}, "body": "Private launch plan"}
 }
 resources = ResourceRegistry()
-resources.register(
-    "document",
-    lambda document_id, subject, _context: (
-        {
-            "id": document_id,
-            "attributes": {"tenant_id": documents[document_id]["tenant_id"]},
-            "relations": {"viewer": subject.id in documents[document_id]["viewers"]},
-        }
-        if document_id in documents
-        else None
-    ),
-)
 
+def load_document(document_id, subject, context):
+    row = documents.get(document_id)
+    if row is None or row["tenant_id"] != subject.tenant_id:
+        return None
+    return {
+        "id": document_id,
+        "attributes": {"tenant_id": row["tenant_id"]},
+        "relations": {"viewer": subject.id in row["viewers"]},
+    }
+
+resources.register("document", load_document)
 authz = Authz.production(catalog, policies, resources)
+
 decision = authz.can(
     Subject(id="alice", tenant_id="acme"),
     operation="document.read",
@@ -149,9 +135,10 @@ decision = authz.can(
     resource_id="doc-1",
 )
 assert decision.allowed
-~~~
+```
 
-Then attach the operation to a final execution guard:
+Put the same operation immediately around the callable that returns data or
+causes the effect:
 
 ~~~python
 from authz_sdk import AgentRuntime, protect_tool
@@ -169,76 +156,65 @@ def read_document(*, subject, document_id):
     return documents[document_id]["body"]
 ~~~
 
-## Support matrix
+## Proof, not promises
 
-| Surface | Status | What users can rely on | Explicit boundary |
-| --- | --- | --- | --- |
-| Native core + Authz.production | Available | Embedded decisions, strict catalog, trusted-resource and tenant checks | Host owns authentication and data lookup correctness |
-| FastAPI | Available, optional extra | Dependency guard before a route handler | Host provides a verified request identity |
-| MCP Python SDK v2 | Beta, optional extra | Final guard immediately before a registered Tool callable | No MCP OAuth, consent, rate limiting, or dynamic tools/list filtering |
-| Agno / LangGraph | Foundation callable wrappers | Guard Python tools/nodes before execution | Not native framework plugins; no checkpoint, handoff, or streaming coverage |
-| Casbin | Available, optional extra | Use an existing Casbin enforcer behind the common contract; production supports the default or static request template | Casbin owns model and policy storage |
-| OPA / Cerbos | Experimental starter transports | Proof-of-concept remote evaluation | Not official/full clients; no async pool, retry, or control plane |
-| OpenFGA / SpiceDB | Experimental; static mapping required in production | Proof-of-concept remote relation/permission check | Host maps a business operation to a valid backend relation/permission and owns model/version semantics |
-| RAG CandidateFilter | Available primitive | Filters candidates before prompt assembly | No automatic SQL/vector pushdown or proof every query path is wired |
-| Packs and tasks | Manual contract | Host can map/check the same operation | SDK does not execute, discover, or automatically cover them |
-| Hosted PDP / relationship graph / control plane | Not provided | — | Use an external system |
+Most authorization libraries can answer a policy question. Agent Authz also
+helps answer an operational question: **did the application attach the final
+check everywhere it claims to?**
 
-~~~mermaid
-flowchart LR
-    I["Verified identity<br/>(host authentication)"] --> G["Agent Authz guard<br/>entrypoint → operation"]
-    E["FastAPI route · Agent Tool · MCP Tool"] --> G
-    G --> R["ResourceRegistry<br/>(host data: tenant + relations)"]
-    R --> P["Native policy<br/>or existing PDP"]
-    P -->|allow| S["Business API or Tool side effect"]
-    P -->|deny| D["403 or Tool error"]
-~~~
+| Capability | What it catches |
+| --- | --- |
+| `CoverageManifest` | Missing final guards, missing declared data boundaries, and unmapped Catalog operations. |
+| FastAPI route inventory | Live registered routes, mounted sub-applications, and matching Authz guards in FastAPI's assembled dependency graph. |
+| `CandidateFilter` | Retrieval candidates that must not enter an LLM prompt. |
+| `ExecutionPermit` + `RedisPermitStore` | Replay of high-risk approvals across workers; shared-store outages fail closed. |
 
-## Beta scope
+Coverage evidence is intentionally scoped: FastAPI has strict evidence from
+its assembled dependency graph; generic Python Agent tools, MCP, and task
+registries are explicit host attestations unless their framework exposes an
+inspectable registry. The report labels these levels rather than pretending to
+scan arbitrary Python code or protect an unintegrated service. Read [Coverage
+evidence](docs/coverage.md) for the exact contract.
 
-Agent Authz is fail-closed where it makes a decision, but the host application
-still must:
+## Fits around your stack
 
-- Authenticate the caller and pass a verified, request-local Subject; never
-  derive identity from Tool arguments or untrusted headers.
-- Load ownership, membership, and tenant facts from a trusted store through
-  ResourceRegistry.
-- Place a final guard immediately before a side effect and re-check current
-  resource version/transaction state where the domain requires it.
-- Route every relevant API, Tool, MCP, retrieval, and task path through a
-  guard; unregistered paths are outside the SDK's visibility.
-- Treat code that can execute arbitrary Python in the service process as
-  trusted. This SDK is not a plugin sandbox; isolate untrusted extensions and
-  put a remote PDP/PEP boundary around them when that threat matters.
-- Use a durable audit sink, shared atomic permit store, query pushdown, key
-  management, and an outage policy when the application needs them.
+| Surface | Availability | Execution boundary |
+| --- | --- | --- |
+| Native core + `Authz.production()` | Available | Catalog, trusted resources, policy, final decision |
+| FastAPI | Available extra | Dependency guard before the handler |
+| Python Agent Tools | Available | Sync/async callable guard before execution |
+| MCP Python SDK 2.x | Beta extra | Registered MCP Tool callable; host owns MCP authentication |
+| Agno / LangGraph | Foundation wrappers | Tool and node execution guards |
+| Casbin | Available extra | Existing enforcer behind the common request/decision contract |
+| OPA / Cerbos / OpenFGA / SpiceDB | Experimental transports | Fail-closed starter adapters, not complete vendor clients |
+| RAG | Available primitive | Filter candidates before prompt assembly |
 
-See the [threat model](docs/threat-model.md), [production guide](docs/production.md),
-and [security policy](SECURITY.md) before a security-sensitive rollout.
+See the [integration matrix](docs/frameworks.md), [policy backend boundaries](docs/backends.md), and [deployment patterns](docs/deployment.md).
 
-## More documentation
+## Production boundary
 
-- [Quickstart](docs/quickstart.md) — Catalog, policy bindings, and trusted loaders
-- [Architecture](docs/architecture.md) — execution contract and trust boundaries
-- [Agent runtime](docs/agent-runtime.md) — discover, mount, execute, and permits
-- [Framework integrations](docs/frameworks.md) — FastAPI, LangGraph, and Agno-style guards
-- [MCP v2](docs/mcp.md) — verified identity and Tool integration
-- [Policy backends](docs/backends.md) — remote-PDP boundary and mapping requirements
-- [Coverage manifest](docs/coverage.md) — CI evidence for declared entrypoints
-- [Migration guide](docs/migration.md) — incremental adoption without a rewrite
-- [Comparison](docs/comparison.md) — how this PEP complements established systems
-- [中文说明](docs/zh-CN/README.md)
+Agent Authz can fail closed for its own decision and permit store. The host
+application is still responsible for:
 
-## Roadmap and contribution
+- authenticating the caller and supplying a verified, request-local `Subject`;
+- loading tenant, ownership, and relationship facts from a trusted source;
+- placing the final guard immediately before a side effect;
+- routing each relevant execution path through a registered guard;
+- durable audit storage, query pushdown, key management, and outage policy.
 
-The next milestone is not a larger policy language. It is making the safe path
-boring: framework inventories, observable remote-PDP contracts, durable
-reference stores, query-pushdown interfaces, and backend conformance suites.
-See [ROADMAP.md](ROADMAP.md).
+For the exact threat model and multi-worker/microservice guidance, read the
+[production guide](docs/production.md), [deployment patterns](docs/deployment.md),
+and [threat model](docs/threat-model.md).
 
-Please read [CONTRIBUTING.md](CONTRIBUTING.md), [SECURITY.md](SECURITY.md), and
-[SUPPLY_CHAIN.md](SUPPLY_CHAIN.md) before opening a pull request or using a
-release artifact.
+## Learn, evaluate, contribute
+
+| Start with | Then evaluate | Before production |
+| --- | --- | --- |
+| [Quickstart](docs/quickstart.md) | [Architecture](docs/architecture.md) · [Comparison](docs/comparison.md) | [Production](docs/production.md) · [Security](SECURITY.md) |
+| [Agent runtime](docs/agent-runtime.md) | [MCP](docs/mcp.md) · [Coverage](docs/coverage.md) | [Supply chain](SUPPLY_CHAIN.md) · [Deployment](docs/deployment.md) |
+
+The public roadmap is in [ROADMAP.md](ROADMAP.md). Please read
+[CONTRIBUTING.md](CONTRIBUTING.md) before opening a pull request.
 
 ## License
 

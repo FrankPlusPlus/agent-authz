@@ -9,6 +9,7 @@ from authz_sdk import (
     Authz,
     AuthorizationError,
     Catalog,
+    CoverageError,
     CoverageManifest,
     MCPAuthz,
     PolicySet,
@@ -60,6 +61,7 @@ def test_mcp_adapter_registers_a_real_v2_tool_with_final_production_guard() -> N
         runtime,
         subject=Subject(id="alice", tenant_id="acme"),
         coverage=coverage,
+        allow_static_subject=True,
     )
 
     @guard.tool(
@@ -86,7 +88,7 @@ def test_mcp_adapter_registers_a_real_v2_tool_with_final_production_guard() -> N
     assert calls == ["doc-1"]
     assert read_document.authz_operation == "document.read"
     assert read_document.authz_phase == "execute"
-    assert coverage.assert_complete().ready
+    assert coverage.assert_attested_complete().ready
 
 
 def test_mcp_adapter_denies_before_tool_side_effect() -> None:
@@ -100,6 +102,7 @@ def test_mcp_adapter_denies_before_tool_side_effect() -> None:
     guard = MCPAuthz(
         runtime,
         subject=Subject(id="bob", tenant_id="acme"),
+        allow_static_subject=True,
     )
 
     @guard.tool(
@@ -117,6 +120,44 @@ def test_mcp_adapter_denies_before_tool_side_effect() -> None:
     assert calls == []
 
 
+def test_mcp_adapter_records_only_successfully_registered_tools_as_verified_coverage() -> None:
+    runtime, coverage = _runtime()
+
+    class DecoratorOnlyMcpServer:
+        def tool(self, **_options):
+            return lambda function: function
+
+    guard = MCPAuthz(
+        runtime,
+        subject=Subject(id="alice", tenant_id="acme"),
+        coverage=coverage,
+        allow_static_subject=True,
+    )
+
+    @guard.tool(
+        DecoratorOnlyMcpServer(),
+        name="read_document",
+        resource_type="document",
+        resource_id=lambda call: call.kwargs["document_id"],
+    )
+    def read_document(document_id: str) -> str:
+        return document_id
+
+    report = coverage.assert_attested_complete()
+
+    assert read_document.authz_protected is True
+    with pytest.raises(CoverageError, match="authorization coverage is incomplete"):
+        coverage.assert_complete()
+    assert report.discovered_entrypoints == (
+        {
+            "kind": "mcp.tool",
+            "name": "read_document",
+            "source": "MCP server registration",
+        },
+    )
+    assert report.enforced_entrypoints[0]["verified"] is False
+
+
 def test_mcp_adapter_returns_a_real_client_error_before_tool_side_effect() -> None:
     pytest.importorskip("mcp")
     from mcp import Client
@@ -125,7 +166,11 @@ def test_mcp_adapter_returns_a_real_client_error_before_tool_side_effect() -> No
     runtime, _coverage = _runtime()
     calls: list[str] = []
     server = MCPServer("Denied document test")
-    guard = MCPAuthz(runtime, subject=Subject(id="bob", tenant_id="acme"))
+    guard = MCPAuthz(
+        runtime,
+        subject=Subject(id="bob", tenant_id="acme"),
+        allow_static_subject=True,
+    )
 
     @guard.tool(
         server,
@@ -154,7 +199,11 @@ def test_mcp_adapter_derives_a_catalog_operation_and_rejects_a_mismatch() -> Non
         def tool(self, **_options):
             return lambda function: function
 
-    guard = MCPAuthz(runtime, subject=Subject(id="alice", tenant_id="acme"))
+    guard = MCPAuthz(
+        runtime,
+        subject=Subject(id="alice", tenant_id="acme"),
+        allow_static_subject=True,
+    )
 
     @guard.tool(
         DecoratorOnlyMcpServer(),
@@ -186,7 +235,11 @@ def test_production_mcp_adapter_requires_a_catalog_binding_by_default() -> None:
             return lambda function: function
 
     server = DecoratorOnlyMcpServer()
-    production_guard = MCPAuthz(runtime, subject=Subject(id="alice", tenant_id="acme"))
+    production_guard = MCPAuthz(
+        runtime,
+        subject=Subject(id="alice", tenant_id="acme"),
+        allow_static_subject=True,
+    )
 
     with pytest.raises(ValueError, match="requires Catalog.bind_entrypoint"):
 
@@ -198,6 +251,7 @@ def test_production_mcp_adapter_requires_a_catalog_binding_by_default() -> None:
         runtime,
         subject=Subject(id="alice", tenant_id="acme"),
         require_catalog_binding=False,
+        allow_static_subject=True,
     )
 
     @migration_guard.tool(server, name="legacy_read", operation="document.read")
@@ -205,3 +259,45 @@ def test_production_mcp_adapter_requires_a_catalog_binding_by_default() -> None:
         return None
 
     assert explicit_migration_operation.authz_operation == "document.read"
+
+
+def test_production_mcp_requires_request_identity_provider_by_default() -> None:
+    runtime, _coverage = _runtime()
+
+    class DecoratorOnlyMcpServer:
+        def tool(self, **_options):
+            return lambda function: function
+
+    server = DecoratorOnlyMcpServer()
+    static_guard = MCPAuthz(runtime, subject=Subject(id="alice", tenant_id="acme"))
+
+    with pytest.raises(ValueError, match="request-local subject provider"):
+
+        @static_guard.tool(
+            server,
+            name="read_document",
+            resource_type="document",
+            resource_id=lambda call: call.kwargs["document_id"],
+        )
+        def rejected_static_identity(document_id: str) -> str:
+            return document_id
+
+    current_subject = Subject(id="alice", tenant_id="acme")
+    calls: list[str] = []
+    request_guard = MCPAuthz(runtime, subject=lambda _call: current_subject)
+
+    @request_guard.tool(
+        server,
+        name="read_document",
+        resource_type="document",
+        resource_id=lambda call: call.kwargs["document_id"],
+    )
+    def read_document(document_id: str) -> str:
+        calls.append(document_id)
+        return document_id
+
+    assert read_document(document_id="doc-1") == "doc-1"
+    current_subject = Subject(id="bob", tenant_id="acme")
+    with pytest.raises(AuthorizationError):
+        read_document(document_id="doc-1")
+    assert calls == ["doc-1"]

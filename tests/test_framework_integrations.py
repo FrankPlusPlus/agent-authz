@@ -16,6 +16,7 @@ from authz_sdk import (
     AuthorizationError,
     LangGraphAuthz,
     PolicySet,
+    record_fastapi_inventory,
     Resource,
     ResourceRegistry,
     Subject,
@@ -115,7 +116,7 @@ def test_agno_wrapper_registers_its_final_guard_in_a_coverage_manifest():
     )
 
     assert guarded() == "content"
-    assert manifest.assert_complete().ready
+    assert manifest.assert_attested_complete().ready
 
 
 def test_agno_wrapper_denies_before_side_effect():
@@ -234,6 +235,7 @@ def test_fastapi_dependency_resolves_a_trusted_resource_before_route_execution()
             calls.append(document_id)
             return {"status": "ok"}
 
+        record_fastapi_inventory(manifest, app)
         return TestClient(app), manifest, calls
 
     client, manifest, calls = client_for(Subject(id="alice", tenant_id="acme"))
@@ -265,6 +267,23 @@ def test_fastapi_example_enforces_the_registry_loaded_document_boundary():
     # Forged request headers do not affect the host-provided identity.
     assert client.get("/documents/doc-public", headers={"x-user-id": "mallory"}).status_code == 200
     assert client.get("/documents/doc-private", headers={"x-user-id": "alice"}).status_code == 403
+
+
+def test_fastapi_casbin_example_keeps_the_final_guard_and_coverage_evidence():
+    pytest.importorskip("casbin")
+    pytest.importorskip("fastapi")
+    from fastapi.testclient import TestClient
+
+    namespace = runpy.run_path(
+        str(Path(__file__).parents[1] / "examples" / "fastapi_casbin_coverage.py")
+    )
+    app = namespace["create_app"](
+        subject_provider=lambda _request: Subject(id="alice", tenant_id="acme")
+    )
+    client = TestClient(app)
+
+    assert client.get("/documents/doc-1").status_code == 200
+    assert app.state.authz_coverage.ready
 
 
 def test_langgraph_node_can_resolve_authenticated_subject_and_resource_from_state():

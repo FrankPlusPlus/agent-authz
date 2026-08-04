@@ -70,6 +70,22 @@ def test_distribution_verifier_rejects_credential_shaped_wheel_content(tmp_path:
     assert any("credential-shaped" in error for error in errors)
 
 
+def test_distribution_policy_requires_the_public_deployment_guide() -> None:
+    helper = Path(__file__).parents[1] / "scripts" / "verify_distribution.py"
+    namespace = runpy.run_path(str(helper))
+
+    assert "docs/deployment.md" in namespace["PUBLIC_DOCS"]
+    assert "docs/deployment.md" in namespace["REQUIRED_SDIST_MEMBERS"]
+
+
+def test_manifest_does_not_package_the_test_suite() -> None:
+    """Keep source archives limited to the reviewed public SDK surface."""
+
+    manifest = (Path(__file__).parents[1] / "MANIFEST.in").read_text(encoding="utf-8")
+
+    assert "prune tests" in manifest
+
+
 def test_distribution_verifier_rejects_path_traversal_in_source_archive(tmp_path: Path) -> None:
     helper = Path(__file__).parents[1] / "scripts" / "verify_distribution.py"
     namespace = runpy.run_path(str(helper))
@@ -117,12 +133,13 @@ def test_distribution_verifier_rejects_wheel_record_hash_or_size_tampering(
     assert any("RECORD size mismatch: authz_sdk/__init__.py" in error for error in errors)
 
 
-def test_release_workflow_uses_hash_locked_read_only_build_and_separate_publish() -> None:
+def test_release_workflow_uses_hash_locked_build_and_trusted_pypi_publish() -> None:
     root = Path(__file__).parents[1]
     workflow = (root / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
     lockfile = (root / "requirements" / "release.txt").read_text(encoding="utf-8")
-    verify_job = workflow.split("  verify:\n", 1)[1].split("  attest-and-release:\n", 1)[0]
-    publish_job = workflow.split("  attest-and-release:\n", 1)[1]
+    verify_job = workflow.split("  verify:\n", 1)[1].split("  pypi-publish:\n", 1)[0]
+    pypi_job = workflow.split("  pypi-publish:\n", 1)[1].split("  attest-and-release:\n", 1)[0]
+    release_job = workflow.split("  attest-and-release:\n", 1)[1]
 
     assert "--hash=sha256:" in lockfile
     assert "python -m pip install --require-hashes -r requirements/release.txt" in verify_job
@@ -130,17 +147,32 @@ def test_release_workflow_uses_hash_locked_read_only_build_and_separate_publish(
     assert "id-token: write" not in verify_job
     assert "attestations: write" not in verify_job
     assert "environment:" not in verify_job
-    assert "environment:" in publish_job
-    assert "contents: write" in publish_job
-    assert "id-token: write" in publish_job
-    assert "attestations: write" in publish_job
-    assert "pip install" not in publish_job
-    assert "python -m build" not in publish_job
+    assert "environment:\n      name: pypi" in pypi_job
+    assert "contents: write" not in pypi_job
+    assert "id-token: write" in pypi_job
+    assert "attestations: write" not in pypi_job
+    assert "pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33" in pypi_job
+    assert "pip install" not in pypi_job
+    assert "python -m build" not in pypi_job
+    assert "needs: [verify, pypi-publish]" in release_job
+    assert "environment:" in release_job
+    assert "contents: write" in release_job
+    assert "id-token: write" in release_job
+    assert "attestations: write" in release_job
+    assert "pip install" not in release_job
+    assert "python -m build" not in release_job
     assert "fetch-depth: 0" in verify_job
     assert "git merge-base --is-ancestor \"$GITHUB_SHA\" \"origin/main\"" in verify_job
     assert "rm -rf dist" in verify_job
+    test_index = verify_job.index("python -m pytest")
+    post_test_cleanup_index = verify_job.index(
+        "find . -type d -name '__pycache__' -prune -exec rm -rf {} +",
+        test_index,
+    )
+    assert test_index < post_test_cleanup_index < verify_job.index("python -m build --no-isolation")
     assert 'test "$(find dist -mindepth 1 -maxdepth 1 -type f | wc -l | tr -d \' \')" = "2"' in verify_job
-    assert 'test "$(find . -mindepth 1 -maxdepth 1 -type f | wc -l | tr -d \' \')" = "6"' in publish_job
+    assert 'test "$(find . -mindepth 1 -maxdepth 1 -type f | wc -l | tr -d \' \')" = "6"' in pypi_job
+    assert 'test "$(find . -mindepth 1 -maxdepth 1 -type f | wc -l | tr -d \' \')" = "6"' in release_job
 
 
 def test_ci_verifies_the_linux_release_lock_before_a_tag_is_created() -> None:
@@ -151,3 +183,15 @@ def test_ci_verifies_the_linux_release_lock_before_a_tag_is_created() -> None:
     assert 'name: Release lock (3.13)' in workflow
     assert "python -m pip install --require-hashes -r requirements/release.txt" in workflow
     assert "python -m pip install --no-deps --no-build-isolation ." in workflow
+
+
+def test_ci_runs_the_real_redis_cross_process_permit_contract() -> None:
+    """Keep the distributed permit claim tied to a real shared-store job."""
+
+    root = Path(__file__).parents[1]
+    workflow = (root / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+
+    assert "redis-e2e:" in workflow
+    assert "image: redis:7.4-alpine" in workflow
+    assert "AUTHZ_REDIS_URL: redis://127.0.0.1:6379/15" in workflow
+    assert "python -m pytest tests/test_redis_e2e.py" in workflow

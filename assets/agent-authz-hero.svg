@@ -1,0 +1,86 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 560" role="img" aria-labelledby="title desc">
+  <title id="title">Agent Authz execution boundary</title>
+  <desc id="desc">API, Agent Tool, MCP Tool, worker, and retrieval paths converge on one business operation, trusted resource facts, and an allow or deny decision before execution.</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0b1020"/>
+      <stop offset="1" stop-color="#151a36"/>
+    </linearGradient>
+    <linearGradient id="glow" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#7c5cff"/>
+      <stop offset="1" stop-color="#21d4fd"/>
+    </linearGradient>
+    <linearGradient id="decision" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#ffb86b"/>
+      <stop offset="1" stop-color="#ff6b9d"/>
+    </linearGradient>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="12" stdDeviation="16" flood-color="#020617" flood-opacity="0.55"/>
+    </filter>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto">
+      <path d="M0 0L10 5L0 10Z" fill="#7c8cff"/>
+    </marker>
+    <marker id="arrow-hot" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto">
+      <path d="M0 0L10 5L0 10Z" fill="#ff9b73"/>
+    </marker>
+  </defs>
+
+  <rect width="1200" height="560" rx="28" fill="url(#bg)"/>
+  <circle cx="1010" cy="90" r="170" fill="#7c5cff" opacity="0.09"/>
+  <circle cx="230" cy="500" r="220" fill="#21d4fd" opacity="0.06"/>
+
+  <text x="70" y="70" fill="#8f9bb8" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="16" letter-spacing="2">THE EXECUTION BOUNDARY</text>
+  <text x="70" y="116" fill="#f7f9ff" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="30" font-weight="700">One operation. Every registered path.</text>
+  <text x="70" y="148" fill="#aeb9d4" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="17">Make the decision before data is returned or a side effect runs.</text>
+
+  <g filter="url(#shadow)">
+    <rect x="70" y="205" width="220" height="235" rx="20" fill="#111a32" stroke="#2b3a66"/>
+    <text x="98" y="238" fill="#8f9bb8" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="13" letter-spacing="1.5">EXECUTION PATHS</text>
+    <rect x="96" y="260" width="166" height="30" rx="10" fill="#1b2850"/>
+    <text x="112" y="280" fill="#d7ddf1" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="14">API route</text>
+    <rect x="96" y="302" width="166" height="30" rx="10" fill="#1b2850"/>
+    <text x="112" y="322" fill="#d7ddf1" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="14">Agent Tool</text>
+    <rect x="96" y="344" width="166" height="30" rx="10" fill="#1b2850"/>
+    <text x="112" y="364" fill="#d7ddf1" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="14">MCP Tool</text>
+    <rect x="96" y="386" width="166" height="30" rx="10" fill="#1b2850"/>
+    <text x="112" y="406" fill="#d7ddf1" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="14">Worker · Retrieval</text>
+  </g>
+
+  <path d="M290 322H390" stroke="#7c8cff" stroke-width="3" marker-end="url(#arrow)"/>
+  <path d="M290 322C335 322 335 322 390 322" stroke="#21d4fd" stroke-width="10" opacity="0.08"/>
+
+  <g filter="url(#shadow)">
+    <rect x="390" y="245" width="270" height="154" rx="22" fill="#151d3b" stroke="url(#glow)" stroke-width="2"/>
+    <text x="420" y="278" fill="#8f9bb8" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="13" letter-spacing="1.5">BUSINESS OPERATION</text>
+    <text x="420" y="328" fill="#ffffff" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="25" font-weight="700">document.publish</text>
+    <text x="420" y="364" fill="#aeb9d4" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="15">one shared question</text>
+  </g>
+
+  <path d="M660 322H760" stroke="#7c8cff" stroke-width="3" marker-end="url(#arrow)"/>
+
+  <g filter="url(#shadow)">
+    <rect x="760" y="205" width="180" height="235" rx="20" fill="#111a32" stroke="#2b3a66"/>
+    <text x="786" y="238" fill="#8f9bb8" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="13" letter-spacing="1.5">CONTEXT</text>
+    <circle cx="805" cy="284" r="8" fill="#21d4fd"/>
+    <text x="825" y="290" fill="#d7ddf1" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="14">verified subject</text>
+    <circle cx="805" cy="330" r="8" fill="#7c5cff"/>
+    <text x="825" y="336" fill="#d7ddf1" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="14">tenant facts</text>
+    <circle cx="805" cy="376" r="8" fill="#ffb86b"/>
+    <text x="825" y="382" fill="#d7ddf1" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="14">resource relations</text>
+    <text x="786" y="416" fill="#7180a4" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="12">host-owned data</text>
+  </g>
+
+  <path d="M940 322H1000" stroke="#ff9b73" stroke-width="3" marker-end="url(#arrow-hot)"/>
+
+  <g filter="url(#shadow)">
+    <rect x="1000" y="205" width="130" height="235" rx="20" fill="#111a32" stroke="#2b3a66"/>
+    <text x="1026" y="238" fill="#8f9bb8" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="13" letter-spacing="1.5">DECISION</text>
+    <rect x="1022" y="268" width="86" height="52" rx="14" fill="#173c42" stroke="#41e0b0"/>
+    <text x="1041" y="301" fill="#8dffd8" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="16" font-weight="700">ALLOW</text>
+    <rect x="1022" y="338" width="86" height="52" rx="14" fill="#432537" stroke="#ff718e"/>
+    <text x="1044" y="371" fill="#ff9eb0" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="16" font-weight="700">DENY</text>
+    <text x="1026" y="416" fill="#7180a4" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="12">before side effect</text>
+  </g>
+
+  <text x="70" y="505" fill="#7180a4" font-family="Inter, ui-sans-serif, system-ui, sans-serif" font-size="14">Agent Authz is the runtime contract around your policy engine—not a replacement for it.</text>
+</svg>

@@ -66,7 +66,7 @@ concrete and backend-neutral:
 | Workers disagree about the operation/policy contract | request/trace IDs, contract version, catalog fingerprint, policy version, native/remote-supplied digest; production remote response binding | Cross-language SDKs, remote consistency tokens, fleet deployment |
 | Policy JSON is changed without a verifiable artifact | immutable `PolicyBundle`, digest, catalog binding, HMAC proof, atomic in-process activate/rollback | Durable review/approval, KMS, canary, distribution, multi-worker rollout |
 | RAG authorization is only an ignored obligation | fail-closed `CandidateFilter` before prompt assembly, body-free filtering summary | SQL/vector pushdown and adapters for each data store |
-| A high-risk Tool can replay an allow | short-lived `ExecutionPermit`, `PermitStore` interface, atomic one-process reference | Redis/DB store, revocation distribution, key rotation, transaction binding |
+| A high-risk Tool can replay an allow | short-lived `ExecutionPermit`, atomic shared `RedisPermitStore` consumption, and one-process reference | key rotation and transaction binding |
 | Auditing copies prompts or secrets by accident | fixed-field `DecisionEvent` and `AuditSink` | Durable delivery, retention, alerting, compliance export |
 
 For a small Python Agent team, this means an embedded path with very few new
@@ -111,8 +111,9 @@ obligation cannot protect a vector query if the vector adapter ignores it.
 - `Authz.production()` for strict catalog, tenant-context, and trusted-resource
   defaults without making every team assemble safety switches.
 - A short-lived HMAC-signed `ExecutionPermit` contract plus one-time
-  `PermitStore` interface. The built-in store is one-process only; the host
-  still owns distributed replay prevention and transaction enforcement.
+  `PermitStore` implementations: `InMemoryPermitStore` for one process and
+  `RedisPermitStore` for shared worker/pod consumption. The host still owns
+  key rotation and transaction enforcement.
 - `PolicyBundle` / `PolicyBundleStore` as catalog-bound, HMAC-verified,
   in-process policy artifact and activation primitives, not a control plane.
 - Fixed-field `DecisionEvent` / `AuditSink` primitives and fail-closed
@@ -135,8 +136,7 @@ The following are not silently claimed as complete:
 
 - a Zanzibar-compatible tuple store, revision consistency, watch stream, or
   `ListObjects` service;
-- distributed permit revocation/replay storage and transaction adapters for
-  fully closing TOCTOU windows;
+- transaction adapters for fully closing TOCTOU windows;
 - a full policy control plane, bundle distribution, approvals, asymmetric
   signing, durable rollback history, hot reload, and non-Python clients;
 - official vector-store adapters and query pushdown that mechanically cover

@@ -1,8 +1,8 @@
 # Supply-chain and release policy
 
 Every public tag must reference a commit reachable from protected `main`, come
-from a green commit, and match the package version exactly (`v0.7.0b3` for
-package version `0.7.0b3`). The release workflow has two deliberately separated
+from a green commit, and match the package version exactly (`v0.7.0b6` for
+package version `0.7.0b6`). The release workflow has two deliberately separated
 jobs:
 
 1. a read-only `verify` job installs `requirements/release.txt` with
@@ -10,12 +10,15 @@ jobs:
    archive contents, and checks package metadata;
 2. that read-only job generates a separate SPDX 2.3 SBOM for the release wheel
    and source distribution;
-3. a protected, write-capable `attest-and-release` job downloads the immutable
-   verified artifact, rechecks its checksums, creates provenance/SBOM
+3. a protected `pypi-publish` job downloads the immutable verified artifact,
+   rechecks its checksums, and publishes only the wheel and source distribution
+   through PyPI Trusted Publishing (GitHub OIDC); it has no long-lived PyPI token;
+4. a protected, write-capable `attest-and-release` job runs only after the PyPI
+   upload succeeds, rechecks the immutable artifact, creates provenance/SBOM
    attestations, and attaches it to a GitHub Release.
 
-The write-capable job does not run `pip`, build Python code, or install PyPI
-packages. `requirements/release.in` documents its exact top-level inputs and
+The PyPI job does not run `pip`, build Python code, or install PyPI packages.
+`requirements/release.in` documents the exact top-level inputs and
 `requirements/release.txt` is the reviewed, hash-locked transitive closure.
 The read-only job clears `dist/` and verifies the exact expected asset count at
 each build/SBOM/checksum phase, so a pre-existing unreviewed sidecar cannot be
@@ -25,31 +28,29 @@ Consumers should download the release wheel and its checksum together, then
 verify both the bytes and GitHub's provenance:
 
 ```bash
-gh release download v0.7.0b3 --repo FrankPlusPlus/agent-authz \
-  --pattern 'agent_authz_sdk-0.7.0b3-py3-none-any.whl' --pattern WHEEL-SHA256SUMS
+gh release download v0.7.0b6 --repo FrankPlusPlus/agent-authz \
+  --pattern 'agent_authz_sdk-0.7.0b6-py3-none-any.whl' --pattern WHEEL-SHA256SUMS
 shasum -a 256 -c WHEEL-SHA256SUMS
-gh attestation verify agent_authz_sdk-0.7.0b3-py3-none-any.whl \
+gh attestation verify agent_authz_sdk-0.7.0b6-py3-none-any.whl \
   -R FrankPlusPlus/agent-authz
-python -m pip install --no-deps agent_authz_sdk-0.7.0b3-py3-none-any.whl
+python -m pip install --no-deps agent_authz_sdk-0.7.0b6-py3-none-any.whl
 ```
 
-No PyPI publishing occurs automatically. If maintainers later publish to
-PyPI, they should use PyPI Trusted Publishing rather than a long-lived API
-token and document the publisher identity in the release notes.
-
-Until PyPI publishing is explicitly enabled, GitHub Releases are the
-supported binary channel. A reviewed source-tag dependency is available for
-source review and development, but Git tags are not content-addressed pins and
-are not a substitute for verifying a release artifact:
+PyPI publishing is configured through a GitHub Actions Trusted Publisher with
+owner `FrankPlusPlus`, repository `agent-authz`, workflow `release.yml`, and
+environment `pypi`. This identity must be configured as a pending publisher on
+PyPI before the first tagged release. GitHub Releases remain the preferred
+channel for checksum and provenance inspection. A reviewed source-tag dependency
+is available for source review and development, but Git tags are not
+content-addressed pins and are not a substitute for verifying a release artifact:
 
 ```bash
-python -m pip install "agent-authz-sdk @ git+https://github.com/FrankPlusPlus/agent-authz.git@v0.7.0b3"
+python -m pip install "agent-authz-sdk @ git+https://github.com/FrankPlusPlus/agent-authz.git@v0.7.0b6"
 ```
 
 The bundled SBOM describes the built SDK distribution and its direct runtime
-metadata. It intentionally has no PyPI PURL while GitHub Releases are the only
-published channel. It does not claim to be an inventory of a consumer
-application, its optional extras, or the GitHub runner image.
+metadata. It does not claim to be an inventory of a consumer application, its
+optional extras, or the GitHub runner image.
 
 ## Required GitHub repository controls before a public tag
 

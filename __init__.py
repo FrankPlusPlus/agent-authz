@@ -6,7 +6,7 @@ integrations can bind their entrypoints to the same operation without making
 application developers learn the policy engine internals.
 """
 
-__version__ = "0.7.0b3"
+__version__ = "0.7.0b6"
 
 from authz_sdk.catalog import (
     CRUD_ACTIONS,
@@ -50,6 +50,8 @@ from authz_sdk.permit_store import (
     PermitStoreCleanupResult,
     PermitStoreResult,
     PermitStoreStatus,
+    RedisPermitStore,
+    permit_store_readiness,
 )
 from authz_sdk.runtime import AGENT_PHASES, AgentRequest, AgentRuntime
 from authz_sdk.backends import (
@@ -65,7 +67,18 @@ from authz_sdk.backends import (
     PdpRequestProjection,
     SpiceDbEvaluator,
 )
-from authz_sdk.integrations import AgnoAuthz, CallInput, FastAPIAuthz, LangGraphAuthz, MCPAuthz, protect_tool
+from authz_sdk.integrations import (
+    AgnoAuthz,
+    CallInput,
+    FastAPIAuthz,
+    FastAPIRouteInventory,
+    LangGraphAuthz,
+    MCPAuthz,
+    discover_fastapi_routes,
+    protect_tool,
+    record_fastapi_inventory,
+    record_tool_inventory,
+)
 
 __all__ = [
     "ActionDefinition",
@@ -123,6 +136,8 @@ __all__ = [
     "ResourceDefinition",
     "ResourceLoader",
     "ResourceRegistry",
+    "RedisPermitStore",
+    "permit_store_readiness",
     "RelationResolver",
     "Subject",
     "SUPPORTED_TEMPLATES",
@@ -132,8 +147,12 @@ __all__ = [
     "AgnoAuthz",
     "CallInput",
     "FastAPIAuthz",
+    "FastAPIRouteInventory",
     "LangGraphAuthz",
     "MCPAuthz",
+    "discover_fastapi_routes",
     "protect_tool",
+    "record_fastapi_inventory",
+    "record_tool_inventory",
     "__version__",
 ]
