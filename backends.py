@@ -905,7 +905,7 @@ class CasbinEvaluator:
             import casbin
         except ImportError as exc:  # pragma: no cover - depends on installation
             raise BackendUnavailableError(
-                "Casbin is optional; install agent-authz-sdk[casbin] first"
+                "Casbin is optional; install agent-authz[casbin] first"
             ) from exc
         return cls(
             casbin.Enforcer(model_path, policy_path),

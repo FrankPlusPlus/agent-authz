@@ -30,7 +30,7 @@ jobs:
       - name: Build clean wheel and source distribution
         run: |
           find . -type d -name '__pycache__' -prune -exec rm -rf {} +
-          rm -rf build dist agent_authz_sdk.egg-info
+          rm -rf build dist agent_authz.egg-info
           python -m build
       - name: Verify distribution contents
         run: python scripts/verify_distribution.py dist
@@ -40,14 +40,14 @@ jobs:
         run: |
           python -m venv /tmp/agent-authz-wheel
           /tmp/agent-authz-wheel/bin/python -m pip install --no-deps dist/*.whl
-          /tmp/agent-authz-wheel/bin/python -c "from importlib.metadata import version; import authz_sdk; assert authz_sdk.__version__ == version('agent-authz-sdk')"
+          /tmp/agent-authz-wheel/bin/python -c "from importlib.metadata import version; import authz_sdk; assert authz_sdk.__version__ == version('agent-authz')"
           (
             cd /tmp/agent-authz-wheel
             /tmp/agent-authz-wheel/bin/python "$GITHUB_WORKSPACE/scripts/verify_documentation_examples.py" "$GITHUB_WORKSPACE"
           )
           python -m venv /tmp/agent-authz-sdist
           /tmp/agent-authz-sdist/bin/python -m pip install --no-deps dist/*.tar.gz
-          /tmp/agent-authz-sdist/bin/python -c "from importlib.metadata import version; import authz_sdk; assert authz_sdk.__version__ == version('agent-authz-sdk')"
+          /tmp/agent-authz-sdist/bin/python -c "from importlib.metadata import version; import authz_sdk; assert authz_sdk.__version__ == version('agent-authz')"
 
   release-lock:
     name: Release lock (3.13)

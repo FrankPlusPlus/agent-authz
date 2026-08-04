@@ -210,11 +210,11 @@ GitHub Release 可用后，部署 wheel 前应验证校验和与 attestation：
 
 ```bash
 gh release download v0.7.0b6 --repo FrankPlusPlus/agent-authz \
-  --pattern 'agent_authz_sdk-0.7.0b6-py3-none-any.whl' --pattern WHEEL-SHA256SUMS
+  --pattern 'agent_authz-0.7.0b6-py3-none-any.whl' --pattern WHEEL-SHA256SUMS
 shasum -a 256 -c WHEEL-SHA256SUMS
-gh attestation verify agent_authz_sdk-0.7.0b6-py3-none-any.whl \
+gh attestation verify agent_authz-0.7.0b6-py3-none-any.whl \
   -R FrankPlusPlus/agent-authz
-python -m pip install --no-deps agent_authz_sdk-0.7.0b6-py3-none-any.whl
+python -m pip install --no-deps agent_authz-0.7.0b6-py3-none-any.whl
 ```
 
 </details>

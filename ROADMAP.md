@@ -64,7 +64,7 @@ installable public package:
   environment described in [SUPPLY_CHAIN.md](SUPPLY_CHAIN.md).
 - Run the Redis cross-process E2E job and MCP SDK 2.x contract suite on the
   exact release commit; record any environment-specific exclusions.
-- Register the `agent-authz-sdk` project name on PyPI and configure PyPI
+- Register the `agent-authz` project name on PyPI and configure PyPI
   Trusted Publishing for this GitHub repository. Do not store a long-lived
   upload token in GitHub Secrets.
 - Add a separate, approval-gated PyPI publishing job only after TestPyPI/PyPI

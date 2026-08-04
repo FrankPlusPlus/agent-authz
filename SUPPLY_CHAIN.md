@@ -29,11 +29,11 @@ verify both the bytes and GitHub's provenance:
 
 ```bash
 gh release download v0.7.0b6 --repo FrankPlusPlus/agent-authz \
-  --pattern 'agent_authz_sdk-0.7.0b6-py3-none-any.whl' --pattern WHEEL-SHA256SUMS
+  --pattern 'agent_authz-0.7.0b6-py3-none-any.whl' --pattern WHEEL-SHA256SUMS
 shasum -a 256 -c WHEEL-SHA256SUMS
-gh attestation verify agent_authz_sdk-0.7.0b6-py3-none-any.whl \
+gh attestation verify agent_authz-0.7.0b6-py3-none-any.whl \
   -R FrankPlusPlus/agent-authz
-python -m pip install --no-deps agent_authz_sdk-0.7.0b6-py3-none-any.whl
+python -m pip install --no-deps agent_authz-0.7.0b6-py3-none-any.whl
 ```
 
 PyPI publishing is configured through a GitHub Actions Trusted Publisher with
@@ -45,7 +45,7 @@ is available for source review and development, but Git tags are not
 content-addressed pins and are not a substitute for verifying a release artifact:
 
 ```bash
-python -m pip install "agent-authz-sdk @ git+https://github.com/FrankPlusPlus/agent-authz.git@v0.7.0b6"
+python -m pip install "agent-authz @ git+https://github.com/FrankPlusPlus/agent-authz.git@v0.7.0b6"
 ```
 
 The bundled SBOM describes the built SDK distribution and its direct runtime
