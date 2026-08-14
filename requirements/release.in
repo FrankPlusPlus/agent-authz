@@ -6,7 +6,7 @@ fastapi==0.141.1
 httpx==0.28.1
 mcp==2.0.0
 pytest==9.1.1
-setuptools==83.0.0
+setuptools==84.0.0
 # Twine pulls keyring, which conditionally requires SecretStorage on the
 # Linux GitHub runner. Keep it explicit so a lock generated on macOS remains
 # complete under --require-hashes on the release runner.
