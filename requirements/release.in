@@ -12,4 +12,4 @@ setuptools==83.0.0
 # complete under --require-hashes on the release runner.
 SecretStorage==3.5.0
 twine==7.0.0
-wheel==0.47.0
+wheel==0.48.0
